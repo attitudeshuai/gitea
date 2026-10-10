@@ -88,7 +88,7 @@ func (q *baseRedis) PushItem(ctx context.Context, data []byte) error {
 }
 
 func (q *baseRedis) PopItem(ctx context.Context) ([]byte, error) {
-	return backoffCall(ctx, backoffOptionsDefault(q.notifySignal, infiniteTimerC), func() (retry bool, data []byte, err error) {
+	return backoffCall(ctx, backoffOptionsDefault(q.notifySignal, infiniteTimerC).withOnError(q.cfg.OnBackendError), func() (retry bool, data []byte, err error) {
 		q.mu.Lock()
 		defer q.mu.Unlock()
 
@@ -97,7 +97,8 @@ func (q *baseRedis) PopItem(ctx context.Context) ([]byte, error) {
 			return true, nil, nil
 		}
 		if err != nil {
-			return true, nil, nil
+			// the backend might be temporarily unavailable, keep retrying but surface the error to the metrics
+			return true, nil, err
 		}
 		if q.isUnique {
 			// the data has been popped, even if there is any error we can't do anything

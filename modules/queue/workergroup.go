@@ -102,7 +102,11 @@ func (q *WorkerPoolQueue[T]) doWorkerHandle(batch []T) {
 		q.workerNumMu.Unlock()
 	}()
 
-	unhandled := q.safeHandler(batch...)
+	unhandled, panicked := q.safeHandler(batch...)
+	if !panicked {
+		// a panicked batch is counted by recordHandlerPanic instead
+		q.metrics.recordProcessed(len(batch)-len(unhandled), len(unhandled))
+	}
 	// if none of the items were handled, it should back-off for a few seconds
 	// in this case the handler (eg: document indexer) may have encountered some errors/failures
 	if len(unhandled) == len(batch) && unhandledItemRequeueDuration.Load() != 0 {
@@ -118,7 +122,7 @@ func (q *WorkerPoolQueue[T]) doWorkerHandle(batch []T) {
 		}
 	}
 	for _, item := range unhandled {
-		if err := q.Push(item); err != nil {
+		if err := q.pushItem(item, true); err != nil {
 			if !q.basePushForShutdown(item) {
 				log.Error("Failed to requeue item for queue %q when calling handler: %v", q.GetName(), err)
 			}
@@ -250,7 +254,9 @@ loop:
 				return
 			}
 			emptyCounter = 0
-			if v, jsonOk := q.unmarshal(data); !jsonOk {
+			if v, err := q.unmarshal(data); err != nil {
+				testRecorder.Record("flush:corrupted:%s", data)
+				q.metrics.recordDropped(err)
 				continue
 			} else {
 				q.doWorkerHandle([]T{v})
@@ -258,6 +264,7 @@ loop:
 		case err := <-wg.popItemErr:
 			if !q.isCtxRunCanceled() {
 				log.Error("Failed to pop item from queue %q (doFlush): %v", q.GetName(), err)
+				q.metrics.recordBackendError(err)
 			}
 			return
 		case <-time.After(20 * time.Millisecond):
@@ -309,8 +316,10 @@ func (q *WorkerPoolQueue[T]) doRun() {
 		}
 		unhandled = append(unhandled, wg.batchBuffer...)
 		for data := range wg.popItemChan {
-			if v, ok := q.unmarshal(data); ok {
+			if v, err := q.unmarshal(data); err == nil {
 				unhandled = append(unhandled, v)
+			} else {
+				q.metrics.recordDropped(err)
 			}
 		}
 
@@ -334,6 +343,13 @@ func (q *WorkerPoolQueue[T]) doRun() {
 		close(q.shutdownDone)
 	}()
 
+	var evaluateC <-chan time.Time = infiniteTimerC
+	if q.metrics.enabled {
+		evaluateTicker := time.NewTicker(time.Second)
+		defer evaluateTicker.Stop()
+		evaluateC = evaluateTicker.C
+	}
+
 	var batchDispatchC <-chan time.Time = infiniteTimerC
 	for {
 		select {
@@ -350,8 +366,9 @@ func (q *WorkerPoolQueue[T]) doRun() {
 			if !dataOk {
 				return
 			}
-			if v, jsonOk := q.unmarshal(data); !jsonOk {
+			if v, err := q.unmarshal(data); err != nil {
 				testRecorder.Record("pop:corrupted:%s", data) // in rare cases the levelqueue(leveldb) might be corrupted
+				q.metrics.recordDropped(err)
 				continue
 			} else {
 				wg.batchBuffer = append(wg.batchBuffer, v)
@@ -364,9 +381,13 @@ func (q *WorkerPoolQueue[T]) doRun() {
 		case <-batchDispatchC:
 			batchDispatchC = infiniteTimerC
 			q.doDispatchBatchToWorker(wg, q.flushChan)
+		case <-evaluateC:
+			// periodically re-evaluate the sliding window so a recovered queue auto returns to normal even without new traffic
+			q.metrics.evaluate()
 		case err := <-wg.popItemErr:
 			if !q.isCtxRunCanceled() {
 				log.Error("Failed to pop item from queue %q (doRun): %v", q.GetName(), err)
+				q.metrics.recordBackendError(err)
 			}
 			return
 		}

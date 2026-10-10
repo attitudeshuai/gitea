@@ -20,10 +20,19 @@ type backoffOptions struct {
 
 	notify <-chan struct{}
 	end    <-chan time.Time
+
+	// onError is called with the error when fn asks for a retry but also reports an error.
+	// The error is otherwise swallowed while the backoff retries keep running.
+	onError func(error)
 }
 
 func backoffOptionsDefault(notify <-chan struct{}, end <-chan time.Time) backoffOptions {
 	return backoffOptions{begin: backoffBegin, upper: backoffUpper, notify: notify, end: end}
+}
+
+func (opts backoffOptions) withOnError(onError func(error)) backoffOptions {
+	opts.onError = onError
+	return opts
 }
 
 func mockBackoffDuration(d time.Duration) func() {
@@ -40,7 +49,12 @@ func backoffCall[T any](ctx context.Context, opts backoffOptions, fn backoffFunc
 		// call the target function
 		retry, ret, err := fn()
 		if err != nil {
-			return ret, err
+			if !retry {
+				return ret, err
+			}
+			if opts.onError != nil {
+				opts.onError(err)
+			}
 		}
 		if !retry {
 			return ret, nil

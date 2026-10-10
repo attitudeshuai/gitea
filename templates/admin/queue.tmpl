@@ -13,11 +13,20 @@
 				<th>{{ctx.Locale.Tr "admin.monitor.queue.numberworkers"}}</th>
 				<th>{{ctx.Locale.Tr "admin.monitor.queue.activeworkers"}}</th>
 				<th>{{ctx.Locale.Tr "admin.monitor.queue.numberinqueue"}}</th>
+				{{if .QueueMetricsEnabled}}
+					<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_status"}}</th>
+					<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_enqueued"}}</th>
+					<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_processed"}}</th>
+					<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_failed"}}</th>
+					<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_dropped"}}</th>
+					<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_rejected"}}</th>
+				{{end}}
 				<th></th>
 			</tr>
 			</thead>
 			<tbody>
 			{{range $qid, $q := .Queues}}
+				{{$m := $q.GetQueueMetrics}}
 			<tr>
 				<td>{{$q.GetName}}</td>
 				<td>{{$q.GetType}}</td>
@@ -25,6 +34,20 @@
 				<td>{{$q.GetWorkerNumber}}</td>
 				<td>{{$q.GetWorkerActiveNumber}}</td>
 				<td>{{$sum := $q.GetQueueItemNumber}}{{if lt $sum 0}}-{{else}}{{$sum}}{{end}}</td>
+				{{if $.QueueMetricsEnabled}}
+					<td>
+						{{if $m.Degraded}}
+							<span class="ui red basic label">{{ctx.Locale.Tr "admin.monitor.queue.metrics_status_degraded"}}</span>
+						{{else}}
+							<span class="ui green basic label">{{ctx.Locale.Tr "admin.monitor.queue.metrics_status_normal"}}</span>
+						{{end}}
+					</td>
+					<td>{{$m.Enqueued}}</td>
+					<td>{{$m.Processed}}</td>
+					<td>{{if gt $m.Failed 0}}<span class="tw-text-red">{{$m.Failed}}</span>{{else}}0{{end}}</td>
+					<td>{{if gt $m.Dropped 0}}<span class="tw-text-red">{{$m.Dropped}}</span>{{else}}0{{end}}</td>
+					<td>{{if gt $m.Rejected 0}}<span class="tw-text-red">{{$m.Rejected}}</span>{{else}}0{{end}}</td>
+				{{end}}
 				<td><a href="{{$.Link}}/{{$qid}}" class="button">{{ctx.Locale.Tr "admin.monitor.queue.review_add"}}</a></td>
 			</tr>
 			{{end}}
@@ -33,4 +56,3 @@
 	</div>
 </div>
 {{template "admin/layout_footer" .}}
-

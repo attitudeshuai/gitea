@@ -40,6 +40,69 @@
 			</table>
 		</div>
 
+		{{if .QueueMetricsEnabled}}
+			{{$m := .Queue.GetQueueMetrics}}
+			<h4 class="ui top attached header">
+				{{ctx.Locale.Tr "admin.monitor.queue.metrics_title"}}
+				<span class="tw-ml-2">
+					{{if $m.Degraded}}
+						<span class="ui red basic label">{{ctx.Locale.Tr "admin.monitor.queue.metrics_status_degraded"}}</span>
+					{{else}}
+						<span class="ui green basic label">{{ctx.Locale.Tr "admin.monitor.queue.metrics_status_normal"}}</span>
+					{{end}}
+				</span>
+			</h4>
+			<div class="ui attached table segment">
+				<table class="ui very basic table unstackable">
+					<thead>
+					<tr>
+						<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_enqueued"}}</th>
+						<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_processed"}}</th>
+						<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_failed"}}</th>
+						<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_dropped"}}</th>
+						<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_rejected"}}</th>
+						<th>{{ctx.Locale.Tr "admin.monitor.queue.metrics_backend_errors"}}</th>
+					</tr>
+					</thead>
+					<tbody>
+					<tr>
+						<td>{{$m.Enqueued}}</td>
+						<td>{{$m.Processed}}</td>
+						<td>{{if gt $m.Failed 0}}<span class="tw-text-red">{{$m.Failed}}</span>{{else}}0{{end}}</td>
+						<td>{{if gt $m.Dropped 0}}<span class="tw-text-red">{{$m.Dropped}}</span>{{else}}0{{end}}</td>
+						<td>{{if gt $m.Rejected 0}}<span class="tw-text-red">{{$m.Rejected}}</span>{{else}}0{{end}}</td>
+						<td>{{if gt $m.BackendErrors 0}}<span class="tw-text-red">{{$m.BackendErrors}}</span>{{else}}0{{end}}</td>
+					</tr>
+					</tbody>
+				</table>
+				<div class="ui relaxed list">
+					<div class="item">
+						<span class="tw-font-semibold">{{ctx.Locale.Tr "admin.monitor.queue.metrics_started_at"}}:</span>
+						{{DateUtils.AbsoluteShort $m.StartAt}}
+					</div>
+					<div class="item">
+						<span class="tw-font-semibold">{{ctx.Locale.Tr "admin.monitor.queue.metrics_degraded_since"}}:</span>
+						{{if $m.Degraded}}
+							<span class="tw-text-red">{{DateUtils.AbsoluteShort $m.DegradedSince}}</span>
+						{{else if not $m.RecoveredAt.IsZero}}
+							{{ctx.Locale.Tr "admin.monitor.queue.metrics_recovered_at" (DateUtils.AbsoluteShort $m.RecoveredAt)}}
+						{{else}}
+							-
+						{{end}}
+					</div>
+					<div class="item">
+						<span class="tw-font-semibold">{{ctx.Locale.Tr "admin.monitor.queue.metrics_last_error"}}:</span>
+						{{if $m.LastError}}
+							<span class="tw-text-red">{{$m.LastError.Summary}}</span>
+							<span class="tw-text-grey-light">{{ctx.Locale.Tr "admin.monitor.queue.metrics_last_error_kind" $m.LastError.Kind (DateUtils.AbsoluteShort $m.LastError.Time)}}</span>
+						{{else}}
+							-
+						{{end}}
+					</div>
+				</div>
+			</div>
+		{{end}}
+
 		<h4 class="ui top attached header">
 			{{ctx.Locale.Tr "admin.monitor.queue.settings.title"}}
 		</h4>

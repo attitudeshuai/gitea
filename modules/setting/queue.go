@@ -4,8 +4,13 @@
 package setting
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"time"
 
 	"gitea.dev/modules/json"
 	"gitea.dev/modules/log"
@@ -25,7 +30,25 @@ type QueueSettings struct {
 
 	BatchLength int
 	MaxWorkers  int
+
+	MetricsEnabled          bool
+	DegradeWindow           time.Duration `json:"-"` // gitea's json has no duration representation; ini MapTo supports it
+	DegradeFailureThreshold float64
+	DegradeMinSamples       int
+	DegradePushBehavior     string
 }
+
+const (
+	queueDegradeWindowDefault           = 10 * time.Minute
+	queueDegradeFailureThresholdDefault = 0.5
+	queueDegradeMinSamplesDefault       = 20
+	// keep in sync with queue.DegradedPushFastFail/queue.DegradedPushBlock (queue imports setting, so no shared constant)
+	queueDegradePushBehaviorDefault = "fast-fail"
+)
+
+// QueueMetricsEnabled is the global [queue].METRICS_ENABLED switch,
+// it gates the prometheus collector registration. Individual queues may still override it.
+var QueueMetricsEnabled bool
 
 func GetQueueSettings(rootCfg ConfigProvider, name string) (QueueSettings, error) {
 	queueSettingsDefault := QueueSettings{
@@ -37,6 +60,11 @@ func GetQueueSettings(rootCfg ConfigProvider, name string) (QueueSettings, error
 		SetName:     "_unique",
 		BatchLength: 20,
 		MaxWorkers:  runtime.NumCPU() / 2,
+
+		DegradeWindow:           queueDegradeWindowDefault,
+		DegradeFailureThreshold: queueDegradeFailureThresholdDefault,
+		DegradeMinSamples:       queueDegradeMinSamplesDefault,
+		DegradePushBehavior:     queueDegradePushBehaviorDefault,
 	}
 	if queueSettingsDefault.MaxWorkers < 1 {
 		queueSettingsDefault.MaxWorkers = 1
@@ -54,6 +82,7 @@ func GetQueueSettings(rootCfg ConfigProvider, name string) (QueueSettings, error
 	}
 
 	cfg.Name = name
+	cfg.DegradeWindow = queueSettingsDefault.DegradeWindow
 	if sec, err := rootCfg.GetSection("queue"); err == nil {
 		if err = sec.MapTo(&cfg); err != nil {
 			log.Error("Failed to map queue common config for %q: %v", name, err)
@@ -93,6 +122,18 @@ func GetQueueSettings(rootCfg ConfigProvider, name string) (QueueSettings, error
 	if cfg.BatchLength <= 0 {
 		cfg.BatchLength = queueSettingsDefault.BatchLength
 	}
+	if cfg.DegradeWindow <= 0 {
+		cfg.DegradeWindow = queueDegradeWindowDefault
+	}
+	if cfg.DegradeFailureThreshold <= 0 || cfg.DegradeFailureThreshold > 1 {
+		cfg.DegradeFailureThreshold = queueDegradeFailureThresholdDefault
+	}
+	if cfg.DegradeMinSamples <= 0 {
+		cfg.DegradeMinSamples = queueDegradeMinSamplesDefault
+	}
+	if cfg.DegradePushBehavior != "fast-fail" && cfg.DegradePushBehavior != "block" {
+		cfg.DegradePushBehavior = queueDegradePushBehaviorDefault
+	}
 
 	return cfg, nil
 }
@@ -120,4 +161,64 @@ func loadQueueFrom(rootCfg ConfigProvider) {
 	if hasOld {
 		log.Fatal("Please update your app.ini to remove deprecated config options")
 	}
+
+	if err := validateQueueConfigSections(rootCfg); err != nil {
+		log.Fatal("Invalid queue configuration: %v", err)
+	}
+
+	if sec, err := rootCfg.GetSection("queue"); err == nil && sec.HasKey("METRICS_ENABLED") {
+		QueueMetricsEnabled, _ = sec.Key("METRICS_ENABLED").Bool()
+	}
+}
+
+// validateQueueConfigSections validates the metrics and degradation options in [queue] and all [queue.*] sections.
+// Invalid values are reported with the exact section and key name so operators can locate them at startup.
+func validateQueueConfigSections(rootCfg ConfigProvider) error {
+	var errs []error
+	for _, sec := range rootCfg.Sections() {
+		name := sec.Name()
+		if name != "queue" && !strings.HasPrefix(name, "queue.") {
+			continue
+		}
+		addErr := func(key, format string, args ...any) {
+			errs = append(errs, fmt.Errorf(`[%s].%s: %s`, name, key, fmt.Sprintf(format, args...)))
+		}
+		if sec.HasKey("METRICS_ENABLED") {
+			if _, err := strconv.ParseBool(strings.TrimSpace(sec.Key("METRICS_ENABLED").String())); err != nil {
+				addErr("METRICS_ENABLED", "must be a boolean (true or false)")
+			}
+		}
+		if sec.HasKey("DEGRADE_WINDOW") {
+			d, err := time.ParseDuration(strings.TrimSpace(sec.Key("DEGRADE_WINDOW").String()))
+			if err != nil {
+				addErr("DEGRADE_WINDOW", "must be a valid duration such as 10m: %v", err)
+			} else if d <= 0 {
+				addErr("DEGRADE_WINDOW", "must be greater than 0")
+			}
+		}
+		if sec.HasKey("DEGRADE_FAILURE_THRESHOLD") {
+			v, err := strconv.ParseFloat(strings.TrimSpace(sec.Key("DEGRADE_FAILURE_THRESHOLD").String()), 64)
+			if err != nil {
+				addErr("DEGRADE_FAILURE_THRESHOLD", "must be a valid number: %v", err)
+			} else if v <= 0 || v > 1 {
+				addErr("DEGRADE_FAILURE_THRESHOLD", "must be greater than 0 and no greater than 1")
+			}
+		}
+		if sec.HasKey("DEGRADE_MIN_SAMPLES") {
+			v, err := strconv.Atoi(strings.TrimSpace(sec.Key("DEGRADE_MIN_SAMPLES").String()))
+			if err != nil {
+				addErr("DEGRADE_MIN_SAMPLES", "must be a valid integer: %v", err)
+			} else if v <= 0 {
+				addErr("DEGRADE_MIN_SAMPLES", "must be greater than 0")
+			}
+		}
+		if sec.HasKey("DEGRADE_PUSH_BEHAVIOR") {
+			switch strings.TrimSpace(sec.Key("DEGRADE_PUSH_BEHAVIOR").String()) {
+			case "fast-fail", "block":
+			default:
+				addErr("DEGRADE_PUSH_BEHAVIOR", `must be "fast-fail" or "block"`)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }

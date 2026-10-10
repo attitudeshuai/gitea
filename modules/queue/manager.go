@@ -31,6 +31,7 @@ type ManagedWorkerPoolQueue interface {
 	GetWorkerMaxNumber() int
 	SetWorkerMaxNumber(num int)
 	GetQueueItemNumber() int
+	GetQueueMetrics() MetricsSnapshot
 
 	// FlushWithContext tries to make the handler process all items in the queue synchronously.
 	// It is for testing purpose only. It's not designed to be used in a cluster.

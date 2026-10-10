@@ -18,6 +18,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/metrics"
 	"gitea.dev/modules/public"
+	"gitea.dev/modules/queue"
 	"gitea.dev/modules/reqctx"
 	"gitea.dev/modules/session"
 	"gitea.dev/modules/setting"
@@ -287,6 +288,7 @@ func Routes() *web.Router {
 
 	if setting.Metrics.Enabled {
 		prometheus.MustRegister(metrics.NewCollector())
+		queue.RegisterMetricsCollector()
 		routes.Get("/metrics", append(mid, Metrics)...)
 	}
 

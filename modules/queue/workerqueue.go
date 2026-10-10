@@ -5,6 +5,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/pprof"
 	"sync"
@@ -27,11 +28,12 @@ type WorkerPoolQueue[T any] struct {
 	shutdownTimeout atomic.Int64 // in case some buggy handlers (workers) would hang forever, "shutdown" should finish in predictable time
 
 	origHandler HandlerFuncT[T]
-	safeHandler HandlerFuncT[T]
+	safeHandler func(t ...T) (unhandled []T, panicked bool)
 
 	baseQueueType string
 	baseConfig    *BaseConfig
 	baseQueue     baseQueue
+	metrics       *queueMetrics
 
 	batchChan  chan []T
 	flushChan  chan flushType
@@ -96,6 +98,10 @@ func (q *WorkerPoolQueue[T]) GetQueueItemNumber() int {
 	return cnt
 }
 
+func (q *WorkerPoolQueue[T]) GetQueueMetrics() MetricsSnapshot {
+	return q.metrics.snapshot()
+}
+
 func (q *WorkerPoolQueue[T]) FlushWithContext(ctx context.Context, timeout time.Duration) (err error) {
 	if q.isBaseQueueDummy() {
 		return nil
@@ -150,12 +156,12 @@ func (q *WorkerPoolQueue[T]) marshal(data T) []byte {
 	return bs
 }
 
-func (q *WorkerPoolQueue[T]) unmarshal(data []byte) (t T, ok bool) {
-	if err := json.Unmarshal(data, &t); err != nil {
+func (q *WorkerPoolQueue[T]) unmarshal(data []byte) (t T, err error) {
+	if err = json.Unmarshal(data, &t); err != nil {
 		log.Error("Failed to unmarshal item from queue %q: %v", q.GetName(), err)
-		return t, false
+		return t, err
 	}
-	return t, true
+	return t, nil
 }
 
 func (q *WorkerPoolQueue[T]) isBaseQueueDummy() bool {
@@ -168,11 +174,41 @@ func (q *WorkerPoolQueue[T]) Push(data T) error {
 	if q.isBaseQueueDummy() && q.safeHandler != nil {
 		// FIXME: the "immediate" queue is only for testing, but it really causes problems because its behavior is different from a real queue.
 		// Even if tests pass, it doesn't mean that there is no bug in code.
-		if data, ok := q.unmarshal(q.marshal(data)); ok {
+		if data, err := q.unmarshal(q.marshal(data)); err == nil {
 			q.safeHandler(data)
 		}
 	}
-	return q.baseQueue.PushItem(q.ctxRun, q.marshal(data))
+	return q.pushItem(data, false)
+}
+
+// pushItem pushes one item into the base queue. Requeued unhandled items bypass the degraded fast-fail gate
+// so already-accepted items are never dropped while the queue is degraded.
+func (q *WorkerPoolQueue[T]) pushItem(data T, requeue bool) error {
+	if !requeue && q.metrics.enabled && q.metrics.pushBehavior == DegradedPushFastFail && q.metrics.isDegraded() {
+		fastErr := q.metrics.fastFailError()
+		q.metrics.recordRejected(errors.Is(fastErr, ErrQueueBackendUnavailable))
+		return fmt.Errorf("WorkerPoolQueue.pushItem: queue %q is degraded: %w", q.GetName(), fastErr)
+	}
+
+	err := q.baseQueue.PushItem(q.ctxRun, q.marshal(data))
+	if !q.metrics.enabled {
+		return err
+	}
+	switch {
+	case err == nil:
+		q.metrics.recordEnqueued()
+		return nil
+	case errors.Is(err, ErrAlreadyInQueue):
+		return err
+	case q.ctxRun.Err() != nil:
+		return err // shutting down, don't count
+	case errors.Is(err, context.DeadlineExceeded):
+		q.metrics.recordRejected(false)
+		return fmt.Errorf("WorkerPoolQueue.pushItem: queue %q is full: %w", q.GetName(), ErrQueueFull)
+	default:
+		q.metrics.recordBackendError(err)
+		return fmt.Errorf("WorkerPoolQueue.pushItem: queue %q backend is unavailable: %w: %v", q.GetName(), ErrQueueBackendUnavailable, err)
+	}
 }
 
 // Has only works for unique queues. Keep in mind that this check may not be reliable (due to lacking of proper transaction support)
@@ -225,6 +261,10 @@ func NewWorkerPoolQueueWithContext[T any](ctx context.Context, name string, queu
 	queueType, newQueueFn := getNewQueueFn(queueSetting.Type)
 	w.baseQueueType = queueType
 	w.baseConfig = toBaseConfig(name, queueSetting)
+	w.metrics = newQueueMetrics(w.baseConfig)
+	if w.baseConfig.MetricsEnabled {
+		w.baseConfig.OnBackendError = w.metrics.recordBackendError
+	}
 	w.baseQueue, err = newQueueFn(w.baseConfig, unique)
 	if err != nil {
 		return nil, err
@@ -240,7 +280,7 @@ func NewWorkerPoolQueueWithContext[T any](ctx context.Context, name string, queu
 	w.batchLength = queueSetting.BatchLength
 
 	w.origHandler = handler
-	w.safeHandler = func(t ...T) (unhandled []T) {
+	w.safeHandler = func(t ...T) (unhandled []T, panicked bool) {
 		defer func() {
 			// FIXME: there is no ctx support in the handler, so process manager is unable to restore the labels
 			// so here we explicitly set the "queue ctx" labels again after the handler is done
@@ -248,12 +288,14 @@ func NewWorkerPoolQueueWithContext[T any](ctx context.Context, name string, queu
 			err := recover()
 			if err != nil {
 				log.Error("Recovered from panic in queue %q handler: %v\n%s", name, err, log.Stack(2))
+				w.metrics.recordHandlerPanic(len(t), err)
+				panicked = true
 			}
 		}()
 		if w.origHandler != nil {
-			return w.origHandler(t...)
+			return w.origHandler(t...), false
 		}
-		return nil
+		return nil, false
 	}
 
 	return &w, nil

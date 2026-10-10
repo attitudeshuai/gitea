@@ -4,7 +4,14 @@
 package queue
 
 import (
+	"time"
+
 	"gitea.dev/modules/setting"
+)
+
+const (
+	DegradedPushFastFail = "fast-fail"
+	DegradedPushBlock    = "block"
 )
 
 type BaseConfig struct {
@@ -15,6 +22,17 @@ type BaseConfig struct {
 	Length  int
 
 	QueueFullName, SetFullName string
+
+	// metrics and degradation, all zero values mean metrics disabled
+	MetricsEnabled          bool
+	DegradeWindow           time.Duration
+	DegradeFailureThreshold float64
+	DegradeMinSamples       int
+	DegradePushBehavior     string
+
+	// OnBackendError is called when a backend operation fails but will be retried.
+	// It is nil when metrics are disabled so the retry behavior stays unchanged.
+	OnBackendError func(err error)
 }
 
 func toBaseConfig(managedName string, queueSetting setting.QueueSettings) *BaseConfig {
@@ -24,6 +42,12 @@ func toBaseConfig(managedName string, queueSetting setting.QueueSettings) *BaseC
 
 		ConnStr: queueSetting.ConnStr,
 		Length:  queueSetting.Length,
+
+		MetricsEnabled:          queueSetting.MetricsEnabled,
+		DegradeWindow:           queueSetting.DegradeWindow,
+		DegradeFailureThreshold: queueSetting.DegradeFailureThreshold,
+		DegradeMinSamples:       queueSetting.DegradeMinSamples,
+		DegradePushBehavior:     queueSetting.DegradePushBehavior,
 	}
 
 	// queue name and set name

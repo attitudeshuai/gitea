@@ -19,6 +19,7 @@ func Queues(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("admin.monitor.queues")
 	ctx.Data["PageIsAdminMonitorQueue"] = true
 	ctx.Data["Queues"] = queue.GetManager().ManagedQueues()
+	ctx.Data["QueueMetricsEnabled"] = setting.QueueMetricsEnabled
 	ctx.HTML(http.StatusOK, tplQueue)
 }
 
@@ -33,6 +34,7 @@ func QueueManage(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("admin.monitor.queue", mq.GetName())
 	ctx.Data["PageIsAdminMonitor"] = true
 	ctx.Data["Queue"] = mq
+	ctx.Data["QueueMetricsEnabled"] = setting.QueueMetricsEnabled
 	ctx.HTML(http.StatusOK, tplQueueManage)
 }
 
