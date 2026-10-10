@@ -170,6 +170,13 @@ var (
 	RepositorySecretUpdate           = define("repository:secret:update", "Updated secret {secret} of repository {scope}.")
 	RepositorySecretRemove           = define("repository:secret:remove", "Removed secret {secret} from repository {scope}.")
 
+	RepositoryPermissionDenyUnauthenticated        = define("repository:permission:deny:unauthenticated", "Denied {actor} access to {scope} ({unit}): unauthenticated.")
+	RepositoryPermissionDenyOwnerInvisible         = define("repository:permission:deny:owner_invisible", "Denied {actor} access to {scope} ({unit}): owner not visible.")
+	RepositoryPermissionDenyOrgMembershipRequired  = define("repository:permission:deny:org_membership_required", "Denied {actor} access to {scope} ({unit}): organization membership required.")
+	RepositoryPermissionDenyTeamUnitNotGranted     = define("repository:permission:deny:team_unit_not_granted", "Denied {actor} access to {scope} ({unit}): team did not grant the unit.")
+	RepositoryPermissionDenyRepoUnitRestricted     = define("repository:permission:deny:repo_unit_restricted", "Denied {actor} access to {scope} ({unit}): repository unit restricted.")
+	RepositoryPermissionDenyCredentialInsufficient = define("repository:permission:deny:credential_insufficient", "Denied {actor} access to {scope} ({unit}): credential insufficient.")
+
 	IssueCreate        = define("issue:create", "Created issue {issue} in repository {scope}.")
 	IssueDelete        = define("issue:delete", "Deleted issue {issue} from repository {scope}.")
 	IssueCommentCreate = define("issue:comment:create", "Added comment {comment_id} to issue {issue} in repository {scope}.")

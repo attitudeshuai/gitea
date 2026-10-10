@@ -340,6 +340,35 @@ var (
 	}
 )
 
+// unitTypeNames are stable machine names used on APIs and audit metadata.
+var unitTypeNames = map[Type]string{
+	TypeCode:            "code",
+	TypeIssues:          "issues",
+	TypePullRequests:    "pull_requests",
+	TypeReleases:        "releases",
+	TypeWiki:            "wiki",
+	TypeExternalWiki:    "external_wiki",
+	TypeExternalTracker: "external_tracker",
+	TypeProjects:        "projects",
+	TypePackages:        "packages",
+	TypeActions:         "actions",
+}
+
+// Name returns the stable machine name of the unit type, empty for invalid types.
+func (u Type) Name() string {
+	return unitTypeNames[u]
+}
+
+// TypeFromName is the inverse of Name.
+func TypeFromName(name string) Type {
+	for t, n := range unitTypeNames {
+		if strings.EqualFold(n, name) {
+			return t
+		}
+	}
+	return TypeInvalid
+}
+
 // FindUnitTypes give the unit key names and return valid unique units and invalid keys
 func FindUnitTypes(nameKeys ...string) (res []Type, invalidKeys []string) {
 	m := make(container.Set[Type])

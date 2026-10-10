@@ -9,6 +9,7 @@ import (
 	"slices"
 
 	auth_model "gitea.dev/models/auth"
+	access_model "gitea.dev/models/perm/access"
 	repo_model "gitea.dev/models/repo"
 	"gitea.dev/models/unit"
 )
@@ -57,6 +58,7 @@ func CheckTokenScopes(ctx *Context, repo *repo_model.Repository, scopes ...auth_
 	}
 
 	if publicOnly && publicOnlyTokenDeniedRepo(ctx, repo) {
+		denyCredential(ctx, repo)
 		ctx.HTTPError(http.StatusForbidden)
 		return
 	}
@@ -68,14 +70,29 @@ func CheckTokenScopes(ctx *Context, repo *repo_model.Repository, scopes ...auth_
 	}
 
 	if !scopeMatched {
+		denyCredential(ctx, repo)
 		ctx.HTTPError(http.StatusForbidden)
 	}
+}
+
+// denyCredential marks a token whose scopes do not suffice for the repository.
+func denyCredential(ctx *Context, repo *repo_model.Repository) {
+	if !PermissionDenyEnabled() {
+		return
+	}
+	d := &access_model.Decision{
+		Unit:       unit.TypeCode,
+		DenyReason: access_model.DenyReasonCredentialInsufficient,
+		Source:     access_model.DecisionSourceRepoUnitPublic,
+	}
+	DenyPermission(ctx.Base, ctx.Doer, repo, d)
 }
 
 // RequireRepoAdmin returns a middleware for requiring repository admin permission
 func RequireRepoAdmin() func(ctx *Context) {
 	return func(ctx *Context) {
 		if !ctx.IsSigned || !ctx.Repo.Permission.IsAdmin() {
+			denyAtGate(ctx, unit.TypeCode, true)
 			ctx.NotFound(nil)
 			return
 		}
@@ -98,6 +115,7 @@ func RequireUnitWriter(unitTypes ...unit.Type) func(ctx *Context) {
 		if slices.ContainsFunc(unitTypes, ctx.Repo.Permission.CanWrite) {
 			return
 		}
+		denyAtGate(ctx, unitTypes[0], true)
 		ctx.NotFound(nil)
 	}
 }
@@ -113,7 +131,23 @@ func RequireUnitReader(unitTypes ...unit.Type) func(ctx *Context) {
 				return
 			}
 		}
+		denyAtGate(ctx, unitTypes[0], false)
 		ctx.NotFound(nil)
+	}
+}
+
+// denyAtGate runs the read-only explanation for the rejected unit and attaches the result.
+// elevation is true for write/admin gates, mapping a read-only grant to the decisive reason.
+func denyAtGate(ctx *Context, unitType unit.Type, elevation bool) {
+	if !PermissionDenyEnabled() {
+		return
+	}
+	d := ExplainUnitDecision(ctx.Base, ctx.Repo.Repository, ctx.Doer, unitType)
+	if elevation && d.Allowed {
+		d = InsufficientModeDecision(d)
+	}
+	if !d.Allowed {
+		DenyPermission(ctx.Base, ctx.Doer, ctx.Repo.Repository, d)
 	}
 }
 

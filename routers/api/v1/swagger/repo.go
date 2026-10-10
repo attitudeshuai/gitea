@@ -414,6 +414,20 @@ type swaggerRepoCollaboratorPermission struct {
 	Body api.RepoCollaboratorPermission `json:"body"`
 }
 
+// RepoPermissionDecision
+// swagger:response RepoPermissionDecision
+type swaggerRepoPermissionDecision struct {
+	// in:body
+	Body api.RepoPermissionDecision `json:"body"`
+}
+
+// PermissionDenyReasonCountList
+// swagger:response PermissionDenyReasonCountList
+type swaggerPermissionDenyReasonCountList struct {
+	// in:body
+	Body []api.PermissionDenyReasonCount `json:"body"`
+}
+
 // RepoIssueConfig
 // swagger:response RepoIssueConfig
 type swaggerRepoIssueConfig struct {

@@ -387,9 +387,16 @@ func GetActionsUserRepoPermission(ctx context.Context, repo *repo_model.Reposito
 // getDeployKeyRepoPermission returns the permissions that a deploy key grants on a repository.
 // A key only ever reaches the git data of the one repository it was added to, at its own access mode.
 func getDeployKeyRepoPermission(ctx context.Context, repo *repo_model.Repository, keyID int64) (perm Permission, err error) {
+	return getDeployKeyRepoPermissionTraced(ctx, repo, keyID, nil)
+}
+
+func getDeployKeyRepoPermissionTraced(ctx context.Context, repo *repo_model.Repository, keyID int64, tr *permTracer) (perm Permission, err error) {
 	key, err := deploykey_model.GetDeployKeyByID(ctx, repo.ID, keyID)
 	if err != nil {
 		if deploykey_model.IsErrDeployKeyNotExist(err) {
+			if tr != nil {
+				tr.finishDenied(DenyReasonCredentialInsufficient, DecisionSourceCollaborator)
+			}
 			return perm, nil // the key belongs to another repository, so it grants nothing here
 		}
 		return perm, err
@@ -400,12 +407,54 @@ func getDeployKeyRepoPermission(ctx context.Context, repo *repo_model.Repository
 
 	perm.units = repo.Units
 	perm.unitsMode = make(map[unit.Type]perm_model.AccessMode)
+	if tr != nil {
+		tr.initUnitsMode()
+		tr.ungranted = &Decision{DenyReason: DenyReasonCredentialInsufficient, Source: DecisionSourceCollaborator}
+	}
 	for _, u := range repo.Units {
 		if u.Type == unit.TypeCode || u.Type == unit.TypeWiki { // a deploy-key only ever reaches git data
 			perm.unitsMode[u.Type] = key.Mode
+			if tr != nil {
+				tr.grantUnit(u.Type, key.Mode, DecisionSourceCollaborator)
+			}
 		}
 	}
 	return perm, nil
+}
+
+// ExplainDoerRepoPermission returns the read-only explanation of user's permission on one unit
+// of repo. It runs the same pipeline that computes the real Permission, so Allowed always matches
+// Permission.CanRead(unitType), and it never writes the database or the permission cache.
+func ExplainDoerRepoPermission(ctx context.Context, repo *repo_model.Repository, user *user_model.User, unitType unit.Type) (*Decision, error) {
+	tr := newPermTracer()
+
+	var (
+		perm Permission
+		err  error
+	)
+	if taskID, ok := user_model.GetActionsUserTaskID(user); ok {
+		if perm, err = GetActionsUserRepoPermission(ctx, repo, user, taskID); err != nil {
+			return nil, err
+		}
+		mode := perm.UnitAccessMode(unitType)
+		d := &Decision{AccessMode: mode, Source: DecisionSourceCollaborator, Unit: unitType}
+		if mode >= perm_model.AccessModeRead {
+			d.Allowed = true
+		} else {
+			d.DenyReason = DenyReasonCredentialInsufficient
+		}
+		return d, nil
+	}
+
+	if keyID, ok := user_model.GetDeployKeyUserDeployKeyID(user); ok {
+		perm, err = getDeployKeyRepoPermissionTraced(ctx, repo, keyID, tr)
+	} else {
+		perm, err = getIndividualUserRepoPermission(ctx, repo, user, tr)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return tr.build(unitType, &perm, repo.Units), nil
 }
 
 // GetDoerRepoPermission returns the repository permission for the current actor,
@@ -424,6 +473,10 @@ func GetDoerRepoPermission(ctx context.Context, repo *repo_model.Repository, use
 // In most request paths, callers should use GetDoerRepoPermission instead.
 // Unlike GetDoerRepoPermission, this helper does not resolve Actions task users.
 func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repository, user *user_model.User) (perm Permission, err error) {
+	return getIndividualUserRepoPermission(ctx, repo, user, nil)
+}
+
+func getIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repository, user *user_model.User, tr *permTracer) (perm Permission, err error) {
 	defer func() {
 		if err == nil {
 			finalProcessRepoUnitPermission(user, &perm)
@@ -439,6 +492,9 @@ func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repos
 	// anonymous user visit private repo.
 	if user == nil && repo.IsPrivate {
 		perm.AccessMode = perm_model.AccessModeNone
+		if tr != nil {
+			tr.finishDenied(DenyReasonUnauthenticated, DecisionSourceRepoUnitPublic)
+		}
 		return perm, nil
 	}
 
@@ -449,9 +505,15 @@ func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repos
 			return perm, err
 		}
 	}
+	if tr != nil {
+		tr.setCollaborator(isCollaborator)
+	}
 
 	if err = repo.LoadOwner(ctx); err != nil {
 		return perm, err
+	}
+	if tr != nil {
+		tr.isOrg = repo.Owner.IsOrganization()
 	}
 
 	// Prevent strangers from checking out public repo of private organization/users
@@ -459,18 +521,28 @@ func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repos
 	// TODO: rename it to "IsOwnerVisibleToDoer"
 	if !organization.HasOrgOrUserVisible(ctx, repo.Owner, user) && !isCollaborator {
 		perm.AccessMode = perm_model.AccessModeNone
+		if tr != nil {
+			tr.finishDenied(DenyReasonOwnerInvisible, DecisionSourceOwner)
+		}
 		return perm, nil
 	}
 
 	// anonymous visit public repo
 	if user == nil {
 		perm.AccessMode = perm_model.AccessModeRead
+		if tr != nil {
+			tr.finishAllowed(perm_model.AccessModeRead, DecisionSourceRepoUnitPublic)
+		}
 		return perm, nil
 	}
 
 	// Admin or the owner has super access to the repository
 	if user.IsAdmin || user.ID == repo.OwnerID {
 		perm.AccessMode = perm_model.AccessModeOwner
+		if tr != nil {
+			source := util.Iif(user.IsAdmin, DecisionSourceSiteAdmin, DecisionSourceOwner)
+			tr.finishAllowed(perm_model.AccessModeOwner, source)
+		}
 		return perm, nil
 	}
 
@@ -478,6 +550,17 @@ func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repos
 	perm.AccessMode, err = modeByOwnerAndAccess(ctx, user, repo)
 	if err != nil {
 		return perm, err
+	}
+
+	if tr != nil {
+		source := DecisionSourceRepoUnitPublic
+		switch {
+		case isCollaborator:
+			source = DecisionSourceCollaborator
+		case repo.Owner.IsOrganization() && organization.OrgFromUser(repo.Owner).HasMemberWithUserID(ctx, user.ID):
+			source = DecisionSourceTeamMember
+		}
+		tr.setBase(perm.AccessMode, source)
 	}
 
 	if !repo.Owner.IsOrganization() {
@@ -498,11 +581,17 @@ func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repos
 	}
 
 	perm.unitsMode = make(map[unit.Type]perm_model.AccessMode)
+	if tr != nil {
+		tr.initUnitsMode()
+	}
 
 	// Collaborators on organization
 	if isCollaborator {
 		for _, u := range repo.Units {
 			perm.unitsMode[u.Type] = perm.AccessMode
+			if tr != nil {
+				tr.grantUnit(u.Type, perm.AccessMode, DecisionSourceCollaborator)
+			}
 		}
 	}
 
@@ -511,6 +600,9 @@ func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repos
 		if team.IsOwnerTeam() || team.AccessMode == perm_model.AccessModeOwner {
 			perm.AccessMode = perm_model.AccessModeOwner
 			perm.unitsMode = nil
+			if tr != nil {
+				tr.finishAllowed(perm_model.AccessModeOwner, DecisionSourceTeamMember)
+			}
 			return perm, nil
 		}
 	}
@@ -520,6 +612,20 @@ func GetIndividualUserRepoPermission(ctx context.Context, repo *repo_model.Repos
 			teamMode, _ := team.UnitAccessModeEx(ctx, u.Type)
 			unitAccessMode := max(perm.unitsMode[u.Type], minAccessMode, teamMode)
 			perm.unitsMode[u.Type] = unitAccessMode
+			if tr != nil {
+				tr.grantUnit(u.Type, minAccessMode, DecisionSourceRepoUnitPublic)
+				rowMode := perm_model.AccessModeNone
+				for _, tu := range team.Units {
+					if tu.Type == u.Type {
+						rowMode = tu.AccessMode
+					}
+				}
+				teamSource := DecisionSourceTeamMember
+				if rowMode >= team.AccessMode && rowMode > perm_model.AccessModeNone {
+					teamSource = DecisionSourceTeamUnitMode
+				}
+				tr.grantUnit(u.Type, teamMode, teamSource)
+			}
 		}
 	}
 

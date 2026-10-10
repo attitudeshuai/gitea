@@ -216,14 +216,55 @@ func repoAssignment() func(ctx *context.APIContext) {
 		}
 
 		if !ctx.Repo.Permission.HasAnyUnitAccessOrPublicAccess() {
+			denyAPIAtGate(ctx, repo, unit.TypeCode, false)
 			ctx.APIErrorNotFound()
 			return
 		}
 
 		if !ctx.TokenCanAccessRepo(repo) {
+			if context.PermissionDenyEnabled() {
+				d := &access_model.Decision{
+					Unit:       unit.TypeCode,
+					DenyReason: access_model.DenyReasonCredentialInsufficient,
+					Source:     access_model.DecisionSourceRepoUnitPublic,
+				}
+				context.DenyPermission(ctx.Base, ctx.Doer, repo, d)
+			}
 			ctx.APIErrorNotFound()
 			return
 		}
+	}
+}
+
+// denyCredentialScope marks an API request whose token scope does not suffice.
+func denyCredentialScope(ctx *context.APIContext) {
+	if !context.PermissionDenyEnabled() {
+		return
+	}
+	d := &access_model.Decision{
+		Unit:       unit.TypeCode,
+		DenyReason: access_model.DenyReasonCredentialInsufficient,
+		Source:     access_model.DecisionSourceRepoUnitPublic,
+	}
+	var repo *repo_model.Repository
+	if ctx.Repo != nil {
+		repo = ctx.Repo.Repository
+	}
+	context.DenyPermission(ctx.Base, ctx.Doer, repo, d)
+}
+
+// denyAPIAtGate runs the read-only explanation at an API denial point and attaches it.
+// elevation maps an allowed lower-mode grant (write/admin gates) to the decisive reason.
+func denyAPIAtGate(ctx *context.APIContext, repo *repo_model.Repository, tp unit.Type, elevation bool) {
+	if !context.PermissionDenyEnabled() {
+		return
+	}
+	d := context.ExplainUnitDecision(ctx.Base, repo, ctx.Doer, tp)
+	if elevation && d.Allowed {
+		d = context.InsufficientModeDecision(d)
+	}
+	if !d.Allowed {
+		context.DenyPermission(ctx.Base, ctx.Doer, repo, d)
 	}
 }
 
@@ -299,6 +340,7 @@ func checkTokenPublicOnly() func(ctx *context.APIContext) {
 				// a public-only token must not reach limited-visibility owners either,
 				// matching the org/user public-only enforcement above
 				if ctx.Package != nil && !ctx.Package.Owner.Visibility.IsPublic() {
+					denyCredentialScope(ctx)
 					ctx.APIError(http.StatusForbidden, "token scope is limited to public packages")
 					return
 				}
@@ -313,6 +355,7 @@ func rejectPublicOnly() func(ctx *context.APIContext) {
 			return
 		}
 
+		denyCredentialScope(ctx)
 		ctx.APIError(http.StatusForbidden, "this endpoint is not available for public-only tokens")
 	}
 }
@@ -348,11 +391,13 @@ func tokenRequiresScopes(requiredScopeCategories ...auth_model.AccessTokenScopeC
 		requiredScopes := auth_model.GetRequiredScopes(requiredScopeLevel, requiredScopeCategories...)
 		allow, err := scope.HasScope(requiredScopes...)
 		if err != nil {
+			denyCredentialScope(ctx)
 			ctx.APIError(http.StatusForbidden, "checking scope failed: "+err.Error())
 			return
 		}
 
 		if !allow {
+			denyCredentialScope(ctx)
 			ctx.APIError(http.StatusForbidden, fmt.Sprintf("token does not have at least one of required scope(s), required=%v, token scope=%v", requiredScopes, scope))
 			return
 		}
@@ -424,6 +469,7 @@ func reqSiteAdmin() func(ctx *context.APIContext) {
 func reqOwner() func(ctx *context.APIContext) {
 	return func(ctx *context.APIContext) {
 		if !ctx.Repo.Permission.IsOwner() && !ctx.IsUserSiteAdmin() {
+			denyAPIAtGate(ctx, ctx.Repo.Repository, unit.TypeCode, true)
 			ctx.APIError(http.StatusForbidden, "user should be the owner of the repo")
 			return
 		}
@@ -433,6 +479,7 @@ func reqOwner() func(ctx *context.APIContext) {
 func reqRepoDangerZone() func(ctx *context.APIContext) {
 	return func(ctx *context.APIContext) {
 		if !access_model.CanDoerManageRepoDangerZone(ctx, ctx.Doer, ctx.Repo.Repository, &ctx.Repo.Permission) {
+			denyAPIAtGate(ctx, ctx.Repo.Repository, unit.TypeCode, true)
 			ctx.APIError(http.StatusForbidden, "user has no permission to manage the danger zone")
 			return
 		}
@@ -453,6 +500,7 @@ func reqSelfOrAdmin() func(ctx *context.APIContext) {
 func reqAdmin() func(ctx *context.APIContext) {
 	return func(ctx *context.APIContext) {
 		if !ctx.IsUserRepoAdmin() && !ctx.IsUserSiteAdmin() {
+			denyAPIAtGate(ctx, ctx.Repo.Repository, unit.TypeCode, true)
 			ctx.APIError(http.StatusForbidden, "user should be an owner or a collaborator with admin write of a repository")
 			return
 		}
@@ -463,6 +511,7 @@ func reqAdmin() func(ctx *context.APIContext) {
 func reqRepoWriter(unitTypes ...unit.Type) func(ctx *context.APIContext) {
 	return func(ctx *context.APIContext) {
 		if !ctx.IsUserRepoWriter(unitTypes) && !ctx.IsUserRepoAdmin() && !ctx.IsUserSiteAdmin() {
+			denyAPIAtGate(ctx, ctx.Repo.Repository, unitTypes[0], true)
 			ctx.APIError(http.StatusForbidden, "user should have a permission to write to a repo")
 			return
 		}
@@ -473,6 +522,7 @@ func reqRepoWriter(unitTypes ...unit.Type) func(ctx *context.APIContext) {
 func reqRepoReader(unitType unit.Type) func(ctx *context.APIContext) {
 	return func(ctx *context.APIContext) {
 		if !ctx.Repo.Permission.CanRead(unitType) && !ctx.IsUserRepoAdmin() && !ctx.IsUserSiteAdmin() {
+			denyAPIAtGate(ctx, ctx.Repo.Repository, unitType, false)
 			ctx.APIError(http.StatusForbidden, "user should have specific read permission or be a repo admin or a site admin")
 			return
 		}
@@ -483,6 +533,7 @@ func reqRepoReader(unitType unit.Type) func(ctx *context.APIContext) {
 func reqAnyRepoReader() func(ctx *context.APIContext) {
 	return func(ctx *context.APIContext) {
 		if !ctx.Repo.Permission.HasAnyUnitAccess() && !ctx.IsUserSiteAdmin() {
+			denyAPIAtGate(ctx, ctx.Repo.Repository, unit.TypeCode, false)
 			ctx.APIError(http.StatusForbidden, "user should have any permission to read repository or permissions of site admin")
 			return
 		}
@@ -1300,6 +1351,9 @@ func Routes() *web.Router {
 			m.Group("/{username}/{reponame}", func() {
 				m.Get("/compare/*", reqRepoReader(unit.TypeCode), repo.CompareDiff)
 
+				m.Get("/permission/check", repo.CheckPermission)
+				m.Get("/permission/deny-reasons", reqAdmin(), repo.ListPermissionDenyReasons)
+
 				m.Combo("").Get(reqAnyRepoReader(), repo.Get).
 					Delete(reqToken(), reqRepoDangerZone(), repo.Delete).
 					Patch(reqToken(), reqAdmin(), bind(api.EditRepoOption{}), repo.Edit)
@@ -1921,6 +1975,7 @@ func Routes() *web.Router {
 				m.Get("/runs", admin.ListWorkflowRuns)
 				m.Get("/jobs", admin.ListWorkflowJobs)
 			})
+			m.Get("/permission/deny-reasons", admin.ListPermissionDenyReasons)
 		}, tokenRequiresScopes(auth_model.AccessTokenScopeCategoryAdmin), reqToken(), reqSiteAdmin())
 
 		m.Group("/topics", func() {

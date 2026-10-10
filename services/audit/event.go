@@ -132,7 +132,11 @@ func writeEvent(ctx context.Context, params RecordParams) {
 	if !setting.AuditRecordEnabled() {
 		return
 	}
+	persistEvent(ctx, params)
+}
 
+// persistEvent writes the event, gated by the caller rather than the general audit switch.
+func persistEvent(ctx context.Context, params RecordParams) {
 	e := buildEvent(ctx, params)
 
 	if err := audit_model.InsertEvent(ctx, e); err != nil {

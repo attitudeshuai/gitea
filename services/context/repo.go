@@ -462,6 +462,12 @@ func repoAssignmentLegacy(ctx *Context, data *repoAssignmentPrepareDataStruct) {
 	}
 
 	if !ctx.Repo.Permission.HasAnyUnitAccessOrPublicAccess() && !canWriteAsMaintainer(ctx) {
+		if PermissionDenyEnabled() {
+			tp := UnitFromRequestPath(ctx.Base, repo.Link())
+			if d := ExplainUnitDecision(ctx.Base, repo, ctx.Doer, tp); !d.Allowed {
+				DenyPermission(ctx.Base, ctx.Doer, repo, d)
+			}
+		}
 		if ctx.FormString("go-get") == "1" {
 			EarlyResponseForGoGetMeta(ctx)
 			return
