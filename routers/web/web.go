@@ -793,6 +793,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
 			m.Get("/audit_logs/export", admin.ExportAuditLogs)
 			m.Get("/stats", admin.MonitorStats)
 			m.Get("/cron", admin.CronTasks)
+			m.Get("/cron/{task}", admin.CronTaskRuns)
 			m.Get("/perftrace", admin.PerfTrace)
 			m.Get("/stacktrace", admin.Stacktrace)
 			m.Post("/stacktrace/cancel/{pid}", admin.StacktraceCancel)

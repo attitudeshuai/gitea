@@ -399,6 +399,19 @@
         },
         "description": "CronList"
       },
+      "CronTaskRunList": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "items": {
+                "$ref": "#/components/schemas/CronTaskRun"
+              },
+              "type": "array"
+            }
+          }
+        },
+        "description": "CronTaskRunList"
+      },
       "CurrentAccessToken": {
         "content": {
           "application/json": {
@@ -5076,11 +5089,20 @@
       "Cron": {
         "description": "Cron represents a Cron task",
         "properties": {
+          "consecutive_failures": {
+            "description": "Number of consecutive failed/timeout runs (only present when cron execution history is enabled)",
+            "format": "int64",
+            "type": "integer",
+            "x-go-name": "ConsecutiveFailures"
+          },
           "exec_times": {
             "description": "The total number of times this cron task has been executed",
             "format": "int64",
             "type": "integer",
             "x-go-name": "ExecTimes"
+          },
+          "last_skipped": {
+            "$ref": "#/components/schemas/CronSkipped"
           },
           "name": {
             "description": "The name of the cron task",
@@ -5099,12 +5121,91 @@
             "type": "string",
             "x-go-name": "Prev"
           },
+          "running": {
+            "description": "Whether a run is currently in progress (only present when cron execution history is enabled)",
+            "type": "boolean",
+            "x-go-name": "Running"
+          },
           "schedule": {
             "description": "The cron schedule expression (e.g., \"0 0 * * *\")",
             "type": "string",
             "x-go-name": "Schedule"
           }
         },
+        "type": "object",
+        "x-go-package": "gitea.dev/modules/structs"
+      },
+      "CronSkipped": {
+        "properties": {
+          "reason": {
+            "description": "Why the trigger was skipped",
+            "type": "string",
+            "x-go-name": "Reason"
+          },
+          "time": {
+            "description": "When the trigger was skipped",
+            "format": "date-time",
+            "type": "string",
+            "x-go-name": "Time"
+          }
+        },
+        "title": "CronSkipped describes the most recent trigger that was skipped instead of executed.",
+        "type": "object",
+        "x-go-package": "gitea.dev/modules/structs"
+      },
+      "CronTaskRun": {
+        "properties": {
+          "doer_id": {
+            "format": "int64",
+            "type": "integer",
+            "x-go-name": "DoerID"
+          },
+          "doer_name": {
+            "type": "string",
+            "x-go-name": "DoerName"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": "integer",
+            "x-go-name": "DurationMs"
+          },
+          "error_category": {
+            "type": "string",
+            "x-go-name": "ErrorCategory"
+          },
+          "finished": {
+            "format": "date-time",
+            "type": "string",
+            "x-go-name": "Finished"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer",
+            "x-go-name": "ID"
+          },
+          "message": {
+            "type": "string",
+            "x-go-name": "Message"
+          },
+          "started": {
+            "format": "date-time",
+            "type": "string",
+            "x-go-name": "Started"
+          },
+          "status": {
+            "type": "string",
+            "x-go-name": "Status"
+          },
+          "task_name": {
+            "type": "string",
+            "x-go-name": "TaskName"
+          },
+          "trigger_type": {
+            "type": "string",
+            "x-go-name": "TriggerType"
+          }
+        },
+        "title": "CronTaskRun represents one recorded run (or attempted run) of a cron task.",
         "type": "object",
         "x-go-package": "gitea.dev/modules/structs"
       },
@@ -11467,9 +11568,59 @@
           },
           "404": {
             "$ref": "#/components/responses/notFound"
+          },
+          "409": {
+            "description": "A previous run of the task has not finished and the overlap policy is \"reject\""
           }
         },
         "summary": "Run cron task",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/cron/{task}/runs": {
+      "get": {
+        "operationId": "adminCronTaskRunList",
+        "parameters": [
+          {
+            "description": "task to list runs for",
+            "in": "path",
+            "name": "task",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/CronTaskRunList"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/notFound"
+          }
+        },
+        "summary": "List recent runs of a cron task",
         "tags": [
           "admin"
         ]

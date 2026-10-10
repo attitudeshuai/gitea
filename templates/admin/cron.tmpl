@@ -14,6 +14,10 @@
 						<th>{{ctx.Locale.Tr "admin.monitor.next"}}</th>
 						<th>{{ctx.Locale.Tr "admin.monitor.previous"}}</th>
 						<th>{{ctx.Locale.Tr "admin.monitor.execute_times"}}</th>
+						{{if .CronHistoryEnabled}}
+							<th>{{ctx.Locale.Tr "admin.monitor.cron.consecutive_failures"}}</th>
+							<th>{{ctx.Locale.Tr "admin.monitor.cron.last_skipped"}}</th>
+						{{end}}
 						<th>{{ctx.Locale.Tr "admin.monitor.last_execution_result"}}</th>
 					</tr>
 				</thead>
@@ -21,12 +25,23 @@
 					{{range .Entries}}
 						<tr>
 							<td><button type="submit" class="ui primary button" name="op" value="{{.Name}}" title="{{ctx.Locale.Tr "admin.dashboard.operation_run"}}">{{svg "octicon-triangle-right"}}</button></td>
-							<td>{{ctx.Locale.Tr (printf "admin.dashboard.%s" .Name)}}</td>
+							<td>
+								{{if $.CronHistoryEnabled}}
+									<a href="{{AppSubUrl}}/-/admin/monitor/cron/{{.Name}}">{{ctx.Locale.Tr (printf "admin.dashboard.%s" .Name)}}</a>
+									{{if .Running}}<span class="tw-text-primary" data-tooltip-content="{{ctx.Locale.Tr "admin.monitor.cron.running"}}">{{svg "octicon-primitive-dot" 16}}</span>{{end}}
+								{{else}}
+									{{ctx.Locale.Tr (printf "admin.dashboard.%s" .Name)}}
+								{{end}}
+							</td>
 							<td>{{.Spec}}</td>
 							<td>{{DateUtils.FullTime .Next}}</td>
 							<td>{{if gt .Prev.Year 1}}{{DateUtils.FullTime .Prev}}{{else}}-{{end}}</td>
 							<td>{{.ExecTimes}}</td>
-							<td {{if ne .Status ""}}data-tooltip-content="{{.FormatLastMessage ctx.Locale}}"{{end}} >{{if eq .Status ""}}—{{else}}{{svg (Iif (eq .Status "finished") "octicon-check" "octicon-x") 16}}{{end}}</td>
+							{{if $.CronHistoryEnabled}}
+								<td>{{if gt .ConsecutiveFailures 0}}<span class="tw-text-red">{{.ConsecutiveFailures}}</span>{{else}}-{{end}}</td>
+								<td {{if not .LastSkippedTime.IsZero}}data-tooltip-content="{{.LastSkippedReason}}"{{end}}>{{if not .LastSkippedTime.IsZero}}{{DateUtils.FullTime .LastSkippedTime}}{{else}}-{{end}}</td>
+							{{end}}
+							<td {{if ne .Status ""}}data-tooltip-content="{{.FormatLastMessage ctx.Locale}}"{{end}}>{{if eq .Status ""}}—{{else}}{{svg (Iif (eq .Status "finished") "octicon-check" "octicon-x") 16}}{{end}}</td>
 						</tr>
 					{{end}}
 				</tbody>

@@ -1871,6 +1871,7 @@ func Routes() *web.Router {
 		m.Group("/admin", func() {
 			m.Group("/cron", func() {
 				m.Get("", admin.ListCronTasks)
+				m.Get("/{task}/runs", admin.ListCronTaskRuns)
 				m.Post("/{task}", admin.PostCronTask)
 			})
 			m.Get("/orgs", admin.GetAllOrgs)

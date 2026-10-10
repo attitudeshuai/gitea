@@ -160,6 +160,9 @@ func loadCommonSettingsFrom(cfg ConfigProvider) error {
 	loadMarkupFrom(cfg)
 	loadRedisFrom(cfg)
 	loadGlobalLockFrom(cfg)
+	if err := loadCronFrom(cfg); err != nil {
+		return err
+	}
 	loadOtherFrom(cfg)
 	return nil
 }

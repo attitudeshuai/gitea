@@ -5,6 +5,7 @@
 package admin
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -36,6 +37,7 @@ const (
 	tplSystemStatus templates.TplName = "admin/system_status"
 	tplSelfCheck    templates.TplName = "admin/self_check"
 	tplCron         templates.TplName = "admin/cron"
+	tplCronHistory  templates.TplName = "admin/cron_history"
 	tplQueue        templates.TplName = "admin/queue"
 	tplPerfTrace    templates.TplName = "admin/perftrace"
 	tplStacktrace   templates.TplName = "admin/stacktrace"
@@ -179,8 +181,15 @@ func DashboardPost(ctx *context.Context) {
 		default:
 			task := cron.GetTask(form.Op)
 			if task != nil {
-				go task.RunWithUser(ctx.Doer, nil)
-				ctx.Flash.Success(ctx.Tr("admin.dashboard.task.started", ctx.Tr("admin.dashboard."+form.Op)))
+				if err := task.RunWithUserAsync(ctx.Doer, nil); err != nil {
+					if errors.Is(err, cron.ErrTaskAlreadyRunning) {
+						ctx.Flash.Error(ctx.Tr("admin.monitor.cron.trigger_rejected", ctx.Tr("admin.dashboard."+form.Op)))
+					} else {
+						ctx.Flash.Error(err.Error())
+					}
+				} else {
+					ctx.Flash.Success(ctx.Tr("admin.dashboard.task.started", ctx.Tr("admin.dashboard."+form.Op)))
+				}
 			} else {
 				ctx.Flash.Error(ctx.Tr("admin.dashboard.task.unknown", form.Op))
 			}
@@ -249,8 +258,38 @@ func SelfCheckPost(ctx *context.Context) {
 func CronTasks(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("admin.monitor.cron")
 	ctx.Data["PageIsAdminMonitorCron"] = true
+	ctx.Data["CronHistoryEnabled"] = setting.Cron.EnableExecutionHistory
 	ctx.Data["Entries"] = cron.ListTasks()
 	ctx.HTML(http.StatusOK, tplCron)
+}
+
+func CronTaskRuns(ctx *context.Context) {
+	if !setting.Cron.EnableExecutionHistory {
+		ctx.NotFound(nil)
+		return
+	}
+	taskName := ctx.PathParam("task")
+	task := cron.GetTask(taskName)
+	if task == nil {
+		ctx.NotFound(nil)
+		return
+	}
+
+	ctx.Data["Title"] = ctx.Tr("admin.monitor.cron")
+	ctx.Data["PageIsAdminMonitorCron"] = true
+	ctx.Data["TaskName"] = taskName
+
+	page := max(ctx.FormInt("page"), 1)
+	runs, total, err := cron.ListTaskRuns(taskName, page, setting.UI.Admin.NoticePagingNum)
+	if err != nil {
+		ctx.ServerError("CronTaskRuns", err)
+		return
+	}
+	ctx.Data["Runs"] = runs
+	ctx.Data["Total"] = total
+	ctx.Data["Page"] = context.NewPagerBuilder(ctx).TotalCount(total).PerPageLimit(setting.UI.Admin.NoticePagingNum).CurPage(page).Build()
+
+	ctx.HTML(http.StatusOK, tplCronHistory)
 }
 
 func MonitorStats(ctx *context.Context) {

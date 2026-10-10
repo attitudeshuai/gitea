@@ -1,0 +1,46 @@
+{{template "admin/layout_head" (dict "pageClass" "admin monitor")}}
+<div class="admin-setting-content">
+	<h4 class="ui top attached header">
+		<a href="{{AppSubUrl}}/-/admin/monitor/cron">{{ctx.Locale.Tr "admin.monitor.cron"}}</a> / {{ctx.Locale.Tr (printf "admin.dashboard.%s" .TaskName)}}
+	</h4>
+	<table class="ui attached segment selectable table unstackable g-table-auto-ellipsis">
+		<thead>
+			<tr>
+				<th>{{ctx.Locale.Tr "admin.monitor.cron.trigger_type"}}</th>
+				<th>{{ctx.Locale.Tr "admin.monitor.cron.doer"}}</th>
+				<th>{{ctx.Locale.Tr "admin.monitor.start"}}</th>
+				<th>{{ctx.Locale.Tr "admin.monitor.cron.finished"}}</th>
+				<th>{{ctx.Locale.Tr "admin.monitor.cron.duration"}}</th>
+				<th>{{ctx.Locale.Tr "admin.monitor.last_execution_result"}}</th>
+				<th>{{ctx.Locale.Tr "admin.monitor.cron.reason"}}</th>
+			</tr>
+		</thead>
+		<tbody>
+			{{range .Runs}}
+				<tr>
+					<td>{{ctx.Locale.Tr (printf "admin.monitor.cron.trigger.%s" .TriggerType)}}</td>
+					<td>{{if .DoerName}}{{.DoerName}}{{else}}(Cron){{end}}</td>
+					<td nowrap>{{DateUtils.FullTime .StartedUnix.AsTime}}</td>
+					<td nowrap>{{if gt .FinishedUnix 0}}{{DateUtils.FullTime .FinishedUnix.AsTime}}{{else}}-{{end}}</td>
+					<td nowrap>{{if gt .FinishedUnix 0}}{{.DurationMs}} ms{{else}}-{{end}}</td>
+					<td>
+						{{if eq .Status "success"}}<span class="tw-text-green">{{svg "octicon-check" 16}} {{ctx.Locale.Tr "admin.monitor.cron.status.success"}}</span>
+						{{else if eq .Status "failed"}}<span class="tw-text-red">{{svg "octicon-x" 16}} {{ctx.Locale.Tr "admin.monitor.cron.status.failed"}}</span>
+						{{else if eq .Status "cancelled"}}{{svg "octicon-x" 16}} {{ctx.Locale.Tr "admin.monitor.cron.status.cancelled"}}
+						{{else if eq .Status "skipped"}}{{svg "octicon-skip" 16}} {{ctx.Locale.Tr "admin.monitor.cron.status.skipped"}}
+						{{else if eq .Status "timeout"}}<span class="tw-text-red">{{svg "octicon-x" 16}} {{ctx.Locale.Tr "admin.monitor.cron.status.timeout"}}</span>
+						{{else if eq .Status "running"}}<span class="tw-text-primary">{{svg "octicon-primitive-dot" 16}} {{ctx.Locale.Tr "admin.monitor.cron.status.running"}}</span>
+						{{else}}<span class="tw-text-yellow">{{svg "octicon-alert" 16}} {{ctx.Locale.Tr "admin.monitor.cron.status.interrupted"}}</span>
+						{{end}}
+						{{if .ErrorCategory}}<div class="text light-2">{{ctx.Locale.Tr (printf "admin.monitor.cron.category.%s" .ErrorCategory)}}</div>{{end}}
+					</td>
+					<td class="auto-ellipsis">{{.Message}}</td>
+				</tr>
+			{{else}}
+				<tr><td class="tw-text-center" colspan="7">{{ctx.Locale.Tr "no_results_found"}}</td></tr>
+			{{end}}
+		</tbody>
+	</table>
+	{{template "base/paginate" .}}
+</div>
+{{template "admin/layout_footer" .}}

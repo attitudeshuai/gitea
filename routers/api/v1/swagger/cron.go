@@ -13,3 +13,10 @@ type swaggerResponseCronList struct {
 	// in:body
 	Body []api.Cron `json:"body"`
 }
+
+// CronTaskRunList
+// swagger:response CronTaskRunList
+type swaggerResponseCronTaskRunList struct {
+	// in:body
+	Body []api.CronTaskRun `json:"body"`
+}
