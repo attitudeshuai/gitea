@@ -4,6 +4,7 @@
 package setting
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -11,6 +12,26 @@ import (
 
 	"gitea.dev/modules/log"
 )
+
+// GitHooksSettings are the execution limits for custom server-side Git hook scripts
+type GitHooksSettings struct {
+	ScriptTimeout int   // max seconds a single hook script may run, 0 = no limit
+	TotalTimeout  int   // max cumulative seconds for hook scripts per wrapper invocation, 0 = no limit
+	MaxOutputSize int64 // max bytes of a hook script's output forwarded to the pusher, 0 = no limit
+}
+
+func (s GitHooksSettings) Validate() error {
+	if s.ScriptTimeout < 0 {
+		return fmt.Errorf("GitHooksSettings.Validate: [git.hooks] SCRIPT_TIMEOUT must not be negative: %d", s.ScriptTimeout)
+	}
+	if s.TotalTimeout < 0 {
+		return fmt.Errorf("GitHooksSettings.Validate: [git.hooks] TOTAL_TIMEOUT must not be negative: %d", s.TotalTimeout)
+	}
+	if s.MaxOutputSize < 0 {
+		return fmt.Errorf("GitHooksSettings.Validate: [git.hooks] MAX_OUTPUT_SIZE must not be negative: %d", s.MaxOutputSize)
+	}
+	return nil
+}
 
 // Git settings
 var Git = struct {
@@ -36,6 +57,7 @@ var Git = struct {
 		Mirror  int
 		GC      int `ini:"GC"`
 	} `ini:"git.timeout"`
+	Hooks GitHooksSettings `ini:"-"`
 }{
 	DisableDiffHighlight:          false,
 	MaxGitDiffLines:               1000,
@@ -113,5 +135,13 @@ func loadGitFrom(rootCfg ConfigProvider) {
 	// validate for a integer percentage between 0% and 100%
 	if !regexp.MustCompile(`^([0-9]|[1-9][0-9]|100)%$`).MatchString(Git.DiffRenameSimilarityThreshold) {
 		log.Fatal("Invalid git.DIFF_RENAME_SIMILARITY_THRESHOLD: %s", Git.DiffRenameSimilarityThreshold)
+	}
+
+	Git.Hooks = GitHooksSettings{}
+	if err := rootCfg.Section("git.hooks").MapTo(&Git.Hooks); err != nil {
+		log.Fatal("Failed to map [git.hooks] settings: %v", err)
+	}
+	if err := Git.Hooks.Validate(); err != nil {
+		log.Fatal("%v", err)
 	}
 }

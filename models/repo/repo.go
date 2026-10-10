@@ -210,6 +210,11 @@ type Repository struct {
 	Topics                          []string           `xorm:"TEXT JSON"`
 	ObjectFormatName                string             `xorm:"VARCHAR(6) NOT NULL DEFAULT 'sha1'"`
 
+	// Custom Git hook script execution limits, NULL means inheriting the global [git.hooks] settings
+	HookScriptTimeout *int   `xorm:"NULL"`
+	HookTotalTimeout  *int   `xorm:"NULL"`
+	HookMaxOutputSize *int64 `xorm:"NULL"`
+
 	TrustModel TrustModelType
 
 	// Avatar: ID(10-20)-md5(32) - must fit into 64 symbols

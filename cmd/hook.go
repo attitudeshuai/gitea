@@ -40,6 +40,7 @@ func newHookCommand() *cli.Command {
 			newHookUpdateCommand(),
 			newHookPostReceiveCommand(),
 			newHookProcReceiveCommand(),
+			newHookRunScriptCommand(),
 		},
 	}
 }

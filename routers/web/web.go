@@ -1214,6 +1214,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
 
 		m.Group("/hooks/git", func() {
 			m.Get("", repo_setting.GitHooks)
+			m.Post("/settings", context.RepoMustNotBeArchived(), repo_setting.GitHooksSettingsPost)
 			m.Combo("/{name}").Get(repo_setting.GitHooksEdit).
 				Post(repo_setting.GitHooksEditPost)
 		}, context.GitHookService())

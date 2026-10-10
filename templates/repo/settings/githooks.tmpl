@@ -16,5 +16,105 @@
 				{{end}}
 			</div>
 		</div>
+
+		<h4 class="ui attached header">
+			{{ctx.Locale.Tr "repo.settings.hook_script_limits"}}
+		</h4>
+		<div class="ui attached segment">
+			<div class="tw-mb-4">{{ctx.Locale.Tr "repo.settings.hook_script_limits_desc"}}</div>
+			<form class="ui form" action="{{$.RepoLink}}/settings/hooks/git/settings" method="post">
+				<table class="ui single line very basic table g-table-auto-ellipsis">
+					<thead>
+						<tr>
+							<th>{{ctx.Locale.Tr "repo.settings.hook_script_limits_setting"}}</th>
+							<th>{{ctx.Locale.Tr "repo.settings.hook_script_limits_repo_override"}}</th>
+							<th>{{ctx.Locale.Tr "repo.settings.hook_script_limits_effective"}}</th>
+							<th>{{ctx.Locale.Tr "repo.settings.hook_script_limits_global"}}</th>
+						</tr>
+					</thead>
+					<tbody>
+						{{range .HookScriptLimitViews}}
+						<tr>
+							<td>{{.Label}}</td>
+							<td><input class="tw-w-32" type="text" inputmode="numeric" name="{{.Field}}" value="{{.Override}}" placeholder="0"></td>
+							<td>
+								{{if .IsUnlimited}}{{ctx.Locale.Tr "repo.settings.hook_script_unlimited"}}{{else}}{{.Effective}}{{end}}
+								{{if .IsCustom}}
+									<span class="ui mini yellow label">{{ctx.Locale.Tr "repo.settings.hook_script_source_custom"}}</span>
+								{{else}}
+									<span class="ui mini basic label">{{ctx.Locale.Tr "repo.settings.hook_script_source_inherited"}}</span>
+								{{end}}
+							</td>
+							<td>{{if eq .Global 0}}{{ctx.Locale.Tr "repo.settings.hook_script_unlimited"}}{{else}}{{.Global}}{{end}}</td>
+						</tr>
+						{{end}}
+					</tbody>
+				</table>
+				<div class="tw-flex tw-items-center tw-gap-4">
+					<button class="ui primary button">{{ctx.Locale.Tr "repo.settings.hook_script_limits_save"}}</button>
+					<span class="text small muted">{{ctx.Locale.Tr "repo.settings.hook_script_limits_inherit_hint"}}</span>
+				</div>
+			</form>
+		</div>
+
+		<h4 class="ui attached header">
+			{{ctx.Locale.Tr "repo.settings.hook_runs"}}
+		</h4>
+		<div class="ui attached segment">
+			<form class="ui form ignore-dirty tw-mb-2" method="get">
+				<div class="inline fields">
+					<div class="field">
+						<select name="hook_name">
+							<option value="">{{ctx.Locale.Tr "repo.settings.hook_runs_all_hooks"}}</option>
+							{{range .HookRunNames}}
+								<option value="{{.}}"{{if eq . $.HookRunHookName}} selected{{end}}>{{.}}</option>
+							{{end}}
+						</select>
+					</div>
+					<div class="field">
+						<select name="phase">
+							<option value="">{{ctx.Locale.Tr "repo.settings.hook_runs_all_phases"}}</option>
+							{{$phases := (dict "0" "pre-receive" "1" "update" "2" "post-receive")}}
+							{{range $phases}}
+								<option value="{{.}}"{{if eq . $.HookRunPhase}} selected{{end}}>{{.}}</option>
+							{{end}}
+						</select>
+					</div>
+					<button class="ui small button">{{ctx.Locale.Tr "search"}}</button>
+				</div>
+			</form>
+			<table class="ui single line very basic selectable table unstackable g-table-auto-ellipsis">
+				<thead>
+					<tr>
+						<th>{{ctx.Locale.Tr "repo.settings.hook_runs_phase"}}</th>
+						<th>{{ctx.Locale.Tr "repo.settings.hook_runs_hook_name"}}</th>
+						<th>{{ctx.Locale.Tr "repo.settings.hook_runs_started"}}</th>
+						<th>{{ctx.Locale.Tr "repo.settings.hook_runs_duration"}}</th>
+						<th>{{ctx.Locale.Tr "repo.settings.hook_runs_exit_code"}}</th>
+						<th>{{ctx.Locale.Tr "repo.settings.hook_runs_status"}}</th>
+					</tr>
+				</thead>
+				<tbody>
+					{{range .HookRuns}}
+					<tr>
+						<td>{{.Phase}}{{if .IsWiki}} <span class="ui mini basic label">wiki</span>{{end}}</td>
+						<td class="gt-ellipsis">{{.HookName}}</td>
+						<td>{{DateUtils.AbsoluteShort .StartedUnix}}</td>
+						<td>{{.DurationMs}} ms</td>
+						<td>{{if .IsSkipped}}-{{else}}{{.GetExitCode}}{{end}}</td>
+						<td class="tw-whitespace-nowrap">
+							{{if .IsTimeout}}<span class="ui mini red label">{{ctx.Locale.Tr "repo.settings.hook_runs_status_timeout"}}</span>{{end}}
+							{{if .IsTruncated}}<span class="ui mini orange label">{{ctx.Locale.Tr "repo.settings.hook_runs_status_truncated"}}</span>{{end}}
+							{{if .IsSkipped}}<span class="ui mini grey label">{{ctx.Locale.Tr "repo.settings.hook_runs_status_skipped"}}</span>{{end}}
+							{{if not (or .IsTimeout .IsTruncated .IsSkipped)}}<span class="ui mini green label">{{ctx.Locale.Tr "repo.settings.hook_runs_status_ok"}}</span>{{end}}
+						</td>
+					</tr>
+					{{else}}
+					<tr><td colspan="6" class="tw-text-center">{{ctx.Locale.Tr "no_results_found"}}</td></tr>
+					{{end}}
+				</tbody>
+			</table>
+			{{template "base/paginate" .}}
+		</div>
 	</div>
 {{template "repo/settings/layout_footer" .}}
