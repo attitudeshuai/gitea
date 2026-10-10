@@ -21,6 +21,7 @@ import (
 	"gitea.dev/modules/queue"
 	"gitea.dev/modules/setting"
 	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/timeutil"
 	"gitea.dev/modules/util"
 	webhook_module "gitea.dev/modules/webhook"
 )
@@ -77,6 +78,7 @@ type EventSource struct {
 // handle delivers hook tasks
 func handler(items ...int64) []int64 {
 	ctx := graceful.GetManager().HammerContext()
+	now := timeutil.TimeStampNanoNow()
 
 	for _, taskID := range items {
 		task, err := webhook_model.GetHookTaskByID(ctx, taskID)
@@ -89,7 +91,12 @@ func handler(items ...int64) []int64 {
 			continue
 		}
 
-		if task.IsDelivered {
+		if retryEnabled() {
+			if !isHookTaskDue(task, now) {
+				log.Trace("Task[%d] is not due for delivery", task.ID)
+				continue
+			}
+		} else if task.IsDelivered {
 			// Already delivered in the meantime
 			log.Trace("Task[%d] has already been delivered", task.ID)
 			continue

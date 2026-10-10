@@ -13,6 +13,7 @@ import (
 	"gitea.dev/models/unittest"
 	"gitea.dev/modules/json"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
 	webhook_module "gitea.dev/modules/webhook"
 
@@ -388,4 +389,210 @@ func TestCleanupHookTaskTable_OlderThan_LeavesTaskEarlierThanAgeToDelete(t *test
 
 	assert.NoError(t, CleanupHookTaskTable(t.Context(), OlderThan, 168*time.Hour, 0))
 	unittest.AssertExistsAndLoadBean(t, hookTask)
+}
+
+func createRetryHookTask(t *testing.T, hookID int64, event webhook_module.HookEventType, status HookTaskStatus,
+	retries int, delivered timeutil.TimeStampNano,
+) *HookTask {
+	t.Helper()
+	task := &HookTask{
+		HookID:         hookID,
+		EventType:      event,
+		IsDelivered:    true,
+		Delivered:      delivered,
+		Status:         status,
+		Retries:        retries,
+		PayloadVersion: 2,
+	}
+	if status == HookTaskStatusWaiting {
+		task.NextRetryAt = delivered
+	}
+	_, err := CreateHookTask(t.Context(), task)
+	require.NoError(t, err)
+	return task
+}
+
+func TestFindHookTasks(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+	hook := &Webhook{RepoID: 3, URL: "https://www.example.com/retry-query", ContentType: ContentTypeJSON, Events: `{"push_only":true}`}
+	require.NoError(t, db.Insert(t.Context(), hook))
+
+	old := timeutil.TimeStampNano(time.Now().Add(-2 * time.Hour).UnixNano())
+	now := timeutil.TimeStampNanoNow()
+	deadPush := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusDead, 3, old)
+	deadCreate := createRetryHookTask(t, hook.ID, webhook_module.HookEventCreate, HookTaskStatusDead, 1, old)
+	succeedPush := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusSucceed, 0, now)
+
+	tasks, total, err := FindHookTasks(t.Context(), FindHookTasksOptions{
+		ListOptions: db.ListOptions{ListAll: true},
+		HookID:      hook.ID,
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, total)
+	assert.Len(t, tasks, 3)
+
+	tasks, total, err = FindHookTasks(t.Context(), FindHookTasksOptions{
+		ListOptions: db.ListOptions{ListAll: true},
+		HookID:      hook.ID,
+		Status:      optional.Some(HookTaskStatusDead),
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, total)
+	assert.ElementsMatch(t, []int64{deadPush.ID, deadCreate.ID}, []int64{tasks[0].ID, tasks[1].ID})
+
+	tasks, _, err = FindHookTasks(t.Context(), FindHookTasksOptions{
+		ListOptions: db.ListOptions{ListAll: true},
+		HookID:      hook.ID,
+		Status:      optional.Some(HookTaskStatusDead),
+		EventType:   optional.Some(webhook_module.HookEventPush),
+	})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, deadPush.ID, tasks[0].ID)
+
+	tasks, _, err = FindHookTasks(t.Context(), FindHookTasksOptions{
+		ListOptions: db.ListOptions{ListAll: true},
+		HookID:      hook.ID,
+		Since:       now,
+	})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, succeedPush.ID, tasks[0].ID)
+}
+
+func TestClaimRetryHookTasks(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+	now := timeutil.TimeStampNanoNow()
+
+	// first claim
+	pending := &HookTask{HookID: 1, EventType: webhook_module.HookEventPush, PayloadVersion: 2}
+	_, err := CreateHookTask(t.Context(), pending)
+	require.NoError(t, err)
+	claimed, err := ClaimPendingHookTask(t.Context(), pending, now)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	claimed, err = ClaimPendingHookTask(t.Context(), pending, now)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+	pending = unittest.AssertExistsAndLoadBean(t, &HookTask{ID: pending.ID})
+	assert.Equal(t, HookTaskStatusSending, pending.Status)
+	assert.True(t, pending.IsDelivered)
+
+	// due retry claim
+	waiting := &HookTask{
+		HookID: 1, EventType: webhook_module.HookEventPush, IsDelivered: true,
+		Status: HookTaskStatusWaiting, NextRetryAt: now - 1, Delivered: now - 10, PayloadVersion: 2,
+	}
+	_, err = CreateHookTask(t.Context(), waiting)
+	require.NoError(t, err)
+	claimed, err = ClaimDueRetryHookTask(t.Context(), waiting, now)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	assert.True(t, waiting.IsDelivered, "retry CAS must not touch is_delivered")
+
+	// future-due task cannot be claimed
+	future := &HookTask{
+		HookID: 1, EventType: webhook_module.HookEventPush, IsDelivered: true,
+		Status: HookTaskStatusWaiting, NextRetryAt: now + 1000, Delivered: now, PayloadVersion: 2,
+	}
+	_, err = CreateHookTask(t.Context(), future)
+	require.NoError(t, err)
+	claimed, err = ClaimDueRetryHookTask(t.Context(), future, now)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+
+	// only a stale sending task can be reclaimed
+	stale := &HookTask{
+		HookID: 1, EventType: webhook_module.HookEventPush, IsDelivered: true,
+		Status: HookTaskStatusSending, Delivered: now - 1000, PayloadVersion: 2,
+	}
+	_, err = CreateHookTask(t.Context(), stale)
+	require.NoError(t, err)
+	claimed, err = ClaimStaleSendingHookTask(t.Context(), stale, now, now-100)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	recent := &HookTask{
+		HookID: 1, EventType: webhook_module.HookEventPush, IsDelivered: true,
+		Status: HookTaskStatusSending, Delivered: now, PayloadVersion: 2,
+	}
+	_, err = CreateHookTask(t.Context(), recent)
+	require.NoError(t, err)
+	claimed, err = ClaimStaleSendingHookTask(t.Context(), recent, now, now-100)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+}
+
+func TestRequeueDeadHookTasks(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+	hook := &Webhook{RepoID: 3, URL: "https://www.example.com/retry-requeue", ContentType: ContentTypeJSON, Events: `{"push_only":true}`}
+	require.NoError(t, db.Insert(t.Context(), hook))
+	old := timeutil.TimeStampNanoNow() - 1000
+	deadPush := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusDead, 3, old)
+	deadCreate := createRetryHookTask(t, hook.ID, webhook_module.HookEventCreate, HookTaskStatusDead, 1, old)
+	createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusSucceed, 0, old)
+
+	ids, err := RequeueDeadHookTasks(t.Context(), hook.ID, RequeueDeadHookTasksOptions{
+		EventType: optional.Some(webhook_module.HookEventPush),
+	})
+	require.NoError(t, err)
+	require.Equal(t, []int64{deadPush.ID}, ids)
+	row := unittest.AssertExistsAndLoadBean(t, &HookTask{ID: deadPush.ID})
+	assert.Equal(t, HookTaskStatusWaiting, row.Status)
+	assert.Equal(t, 3, row.Retries, "automatic retry counter must be preserved")
+	assert.Positive(t, int64(row.NextRetryAt))
+
+	// the create event is untouched and a second call has nothing to requeue
+	unittest.AssertExistsAndLoadBean(t, &HookTask{ID: deadCreate.ID, Status: HookTaskStatusDead})
+	ids, err = RequeueDeadHookTasks(t.Context(), hook.ID, RequeueDeadHookTasksOptions{})
+	require.NoError(t, err)
+	require.Equal(t, []int64{deadCreate.ID}, ids)
+	ids, err = RequeueDeadHookTasks(t.Context(), hook.ID, RequeueDeadHookTasksOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}
+
+func TestCleanupHookTaskTable_RetryStates(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+	hook := &Webhook{RepoID: 3, URL: "https://www.example.com/retry-cleanup", ContentType: ContentTypeJSON, Events: `{"push_only":true}`}
+	require.NoError(t, db.Insert(t.Context(), hook))
+
+	old := timeutil.TimeStampNano(time.Now().Add(-8 * 24 * time.Hour).UnixNano())
+	recent := timeutil.TimeStampNanoNow()
+	oldDead := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusDead, 3, old)
+	oldWaiting := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusWaiting, 1, old)
+	oldSucceed := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusSucceed, 0, old)
+	recentFailed := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusFailed, 0, recent)
+
+	// the standard plan must not delete tasks that are still being retried
+	require.NoError(t, CleanupHookTaskTable(t.Context(), OlderThan, time.Hour, 0))
+	unittest.AssertExistsAndLoadBean(t, &HookTask{ID: oldWaiting.ID})
+	unittest.AssertNotExistsBean(t, &HookTask{ID: oldDead.ID})
+	unittest.AssertNotExistsBean(t, &HookTask{ID: oldSucceed.ID})
+	unittest.AssertExistsAndLoadBean(t, &HookTask{ID: recentFailed.ID})
+}
+
+func TestCleanupHookTaskTable_FailedRetention(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+	oldRetention := setting.Webhook.RetryFailedRetention
+	setting.Webhook.RetryFailedRetention = 48 * time.Hour
+	t.Cleanup(func() { setting.Webhook.RetryFailedRetention = oldRetention })
+
+	hook := &Webhook{RepoID: 3, URL: "https://www.example.com/retry-retention", ContentType: ContentTypeJSON, Events: `{"push_only":true}`}
+	require.NoError(t, db.Insert(t.Context(), hook))
+
+	old := timeutil.TimeStampNano(time.Now().Add(-8 * 24 * time.Hour).UnixNano())
+	recent := timeutil.TimeStampNanoNow()
+	oldDead := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusDead, 3, old)
+	oldFailed := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusFailed, 0, old)
+	oldWaiting := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusWaiting, 1, old)
+	oldSucceed := createRetryHookTask(t, hook.ID, webhook_module.HookEventPush, HookTaskStatusSucceed, 0, old)
+	recentDead := createRetryHookTask(t, hook.ID, webhook_module.HookEventCreate, HookTaskStatusDead, 3, recent)
+
+	// a very long general plan, only the failed/dead retention should delete
+	require.NoError(t, CleanupHookTaskTable(t.Context(), OlderThan, 365*24*time.Hour, 0))
+	unittest.AssertNotExistsBean(t, &HookTask{ID: oldDead.ID})
+	unittest.AssertNotExistsBean(t, &HookTask{ID: oldFailed.ID})
+	unittest.AssertExistsAndLoadBean(t, &HookTask{ID: oldWaiting.ID})
+	unittest.AssertExistsAndLoadBean(t, &HookTask{ID: oldSucceed.ID})
+	unittest.AssertExistsAndLoadBean(t, &HookTask{ID: recentDead.ID})
 }

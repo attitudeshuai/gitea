@@ -594,6 +594,129 @@
         }
       }
     },
+    "/admin/hooks/{id}/tasks": {
+      "get": {
+        "produces": [
+          "application/json"
+        ],
+        "tags": [
+          "admin"
+        ],
+        "summary": "List a webhook's delivery tasks",
+        "operationId": "adminListHookTasks",
+        "parameters": [
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "id of the hook",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "enum": [
+              "pending",
+              "succeed",
+              "failed",
+              "waiting",
+              "dead",
+              "sending"
+            ],
+            "type": "string",
+            "description": "filter by delivery status",
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "filter by event type, e.g. push",
+            "name": "event_type",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "format": "date-time",
+            "description": "only tasks delivered at or after this time, ISO 8601 (RFC 3339)",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "format": "date-time",
+            "description": "only tasks delivered at or before this time, ISO 8601 (RFC 3339)",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "type": "integer",
+            "description": "page number of results to return (1-based)",
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "type": "integer",
+            "description": "page size of results",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/HookTaskList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        }
+      }
+    },
+    "/admin/hooks/{id}/tasks/redeliver": {
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "tags": [
+          "admin"
+        ],
+        "summary": "Batch-redeliver a webhook's dead-letter tasks",
+        "operationId": "adminRedeliverHookTasks",
+        "parameters": [
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "id of the hook",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "description": "filters selecting the dead-letter tasks",
+            "name": "options",
+            "in": "body",
+            "schema": {
+              "$ref": "#/definitions/RedeliverHookTasksOption"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/HookTaskRedeliverResult"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        }
+      }
+    },
     "/admin/orgs": {
       "get": {
         "produces": [
@@ -30202,6 +30325,117 @@
       },
       "x-go-package": "gitea.dev/modules/structs"
     },
+    "HookTask": {
+      "type": "object",
+      "title": "HookTask represents one webhook delivery task and its retry state.",
+      "properties": {
+        "delivered": {
+          "type": "string",
+          "format": "date-time",
+          "x-go-name": "Delivered"
+        },
+        "event_type": {
+          "type": "string",
+          "x-go-name": "EventType"
+        },
+        "hook_id": {
+          "type": "integer",
+          "format": "int64",
+          "x-go-name": "HookID"
+        },
+        "id": {
+          "type": "integer",
+          "format": "int64",
+          "x-go-name": "ID"
+        },
+        "is_delivered": {
+          "type": "boolean",
+          "x-go-name": "IsDelivered"
+        },
+        "is_succeed": {
+          "type": "boolean",
+          "x-go-name": "IsSucceed"
+        },
+        "last_error": {
+          "type": "string",
+          "x-go-name": "LastError"
+        },
+        "next_retry_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-go-name": "NextRetryAt"
+        },
+        "request": {
+          "$ref": "#/definitions/HookTaskRequest"
+        },
+        "response": {
+          "$ref": "#/definitions/HookTaskResponse"
+        },
+        "retries": {
+          "type": "integer",
+          "format": "int64",
+          "x-go-name": "Retries"
+        },
+        "status": {
+          "type": "string",
+          "x-go-name": "Status"
+        },
+        "uuid": {
+          "type": "string",
+          "x-go-name": "UUID"
+        }
+      },
+      "x-go-package": "gitea.dev/modules/structs"
+    },
+    "HookTaskRequest": {
+      "type": "object",
+      "title": "HookTaskRequest is the recorded HTTP request of a delivery attempt.",
+      "properties": {
+        "body": {
+          "type": "string",
+          "x-go-name": "Body"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "x-go-name": "Headers"
+        },
+        "http_method": {
+          "type": "string",
+          "x-go-name": "HTTPMethod"
+        },
+        "url": {
+          "type": "string",
+          "x-go-name": "URL"
+        }
+      },
+      "x-go-package": "gitea.dev/modules/structs"
+    },
+    "HookTaskResponse": {
+      "type": "object",
+      "title": "HookTaskResponse is the recorded HTTP response of a delivery attempt.",
+      "properties": {
+        "body": {
+          "type": "string",
+          "x-go-name": "Body"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "x-go-name": "Headers"
+        },
+        "status": {
+          "type": "integer",
+          "format": "int64",
+          "x-go-name": "Status"
+        }
+      },
+      "x-go-package": "gitea.dev/modules/structs"
+    },
     "Identity": {
       "description": "Identity for a person's identity like an author or committer",
       "type": "object",
@@ -32364,6 +32598,39 @@
       },
       "x-go-package": "gitea.dev/modules/structs"
     },
+    "RedeliverHookTasksOption": {
+      "type": "object",
+      "title": "RedeliverHookTasksOption selects dead-letter tasks for a batch redelivery.",
+      "properties": {
+        "event_type": {
+          "type": "string",
+          "x-go-name": "EventType"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "x-go-name": "Since"
+        },
+        "until": {
+          "type": "string",
+          "format": "date-time",
+          "x-go-name": "Until"
+        }
+      },
+      "x-go-package": "gitea.dev/modules/structs"
+    },
+    "RedeliverHookTasksResponse": {
+      "type": "object",
+      "title": "RedeliverHookTasksResponse contains the number of dead-letter tasks requeued.",
+      "properties": {
+        "redelivered": {
+          "type": "integer",
+          "format": "int64",
+          "x-go-name": "Redelivered"
+        }
+      },
+      "x-go-package": "gitea.dev/modules/structs"
+    },
     "Reference": {
       "type": "object",
       "title": "Reference represents a Git reference.",
@@ -34513,6 +34780,21 @@
         "items": {
           "$ref": "#/definitions/Hook"
         }
+      }
+    },
+    "HookTaskList": {
+      "description": "HookTaskList",
+      "schema": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/HookTask"
+        }
+      }
+    },
+    "HookTaskRedeliverResult": {
+      "description": "HookTaskRedeliverResult",
+      "schema": {
+        "$ref": "#/definitions/RedeliverHookTasksResponse"
       }
     },
     "Issue": {

@@ -105,6 +105,20 @@ type swaggerResponseHookList struct {
 	Body []api.Hook `json:"body"`
 }
 
+// HookTaskList
+// swagger:response HookTaskList
+type swaggerResponseHookTaskList struct {
+	// in:body
+	Body []api.HookTask `json:"body"`
+}
+
+// HookTaskRedeliverResult
+// swagger:response HookTaskRedeliverResult
+type swaggerResponseHookTaskRedeliverResult struct {
+	// in:body
+	Body api.RedeliverHookTasksResponse `json:"body"`
+}
+
 // GitHook
 // swagger:response GitHook
 type swaggerResponseGitHook struct {

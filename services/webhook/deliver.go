@@ -142,6 +142,67 @@ func addDefaultHeaders(req *http.Request, secret []byte, w *webhook_model.Webhoo
 	return nil
 }
 
+// prepareHookRequest creates the [http.Request] (depending on the webhook type)
+// and records the request information, including the masked Authorization header.
+func prepareHookRequest(ctx context.Context, w *webhook_model.Webhook, t *webhook_model.HookTask) (*http.Request, error) {
+	newRequest := webhookRequesters[w.Type]
+	if t.PayloadVersion == 1 || newRequest == nil {
+		newRequest = newDefaultRequest
+	}
+
+	req, body, err := newRequest(ctx, w, t)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create http request for webhook %s[%d %s]: %w", w.Type, w.ID, w.URL, err)
+	}
+
+	// Record delivery information.
+	t.RequestInfo = &webhook_model.HookRequest{
+		URL:        req.URL.String(),
+		HTTPMethod: req.Method,
+		Headers:    map[string]string{},
+		Body:       string(body),
+	}
+	for k, vals := range req.Header {
+		t.RequestInfo.Headers[k] = strings.Join(vals, ",")
+	}
+
+	// Add Authorization Header
+	authorization, err := w.HeaderAuthorization()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get Authorization header for webhook %s[%d %s]: %w", w.Type, w.ID, w.URL, err)
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+		t.RequestInfo.Headers["Authorization"] = "******"
+	}
+	return req, nil
+}
+
+// sendHookRequest performs the HTTP request and records the response information.
+func sendHookRequest(ctx context.Context, w *webhook_model.Webhook, t *webhook_model.HookTask, req *http.Request) error {
+	resp, err := webhookHTTPClient.Do(req.WithContext(ctx))
+	if err != nil {
+		t.ResponseInfo.Body = fmt.Sprintf("Delivery: %v", err)
+		return fmt.Errorf("unable to deliver webhook task[%d] in %s due to error in http client: %w", t.ID, w.URL, err)
+	}
+	defer resp.Body.Close()
+
+	// Status code is 20x can be seen as succeed.
+	t.IsSucceed = resp.StatusCode/100 == 2
+	t.ResponseInfo.Status = resp.StatusCode
+	for k, vals := range resp.Header {
+		t.ResponseInfo.Headers[k] = strings.Join(vals, ",")
+	}
+
+	p, err := util.ReadWithLimit(resp.Body, 1024*1024)
+	if err != nil {
+		t.ResponseInfo.Body = fmt.Sprintf("read body: %s", err)
+		return fmt.Errorf("unable to deliver webhook task[%d] in %s as unable to read response body: %w", t.ID, w.URL, err)
+	}
+	t.ResponseInfo.Body = string(p)
+	return nil
+}
+
 // Deliver creates the [http.Request] (depending on the webhook type), sends it
 // and records the status and response.
 func Deliver(ctx context.Context, t *webhook_model.HookTask) error {
@@ -159,37 +220,20 @@ func Deliver(ctx context.Context, t *webhook_model.HookTask) error {
 		log.Error("PANIC whilst trying to deliver webhook task[%d] to webhook %s Panic: %v\nStacktrace: %s", t.ID, w.URL, err, log.Stack(2))
 	}()
 
+	if retryEnabled() {
+		return deliverWithRetry(ctx, w, t)
+	}
+	return deliverLegacy(ctx, w, t)
+}
+
+// deliverLegacy is the single-attempt delivery path used when automatic retries
+// are disabled. Its behavior must stay identical to the historical behavior.
+func deliverLegacy(ctx context.Context, w *webhook_model.Webhook, t *webhook_model.HookTask) error {
 	t.IsDelivered = true
 
-	newRequest := webhookRequesters[w.Type]
-	if t.PayloadVersion == 1 || newRequest == nil {
-		newRequest = newDefaultRequest
-	}
-
-	req, body, err := newRequest(ctx, w, t)
+	req, err := prepareHookRequest(ctx, w, t)
 	if err != nil {
-		return fmt.Errorf("cannot create http request for webhook %s[%d %s]: %w", w.Type, w.ID, w.URL, err)
-	}
-
-	// Record delivery information.
-	t.RequestInfo = &webhook_model.HookRequest{
-		URL:        req.URL.String(),
-		HTTPMethod: req.Method,
-		Headers:    map[string]string{},
-		Body:       string(body),
-	}
-	for k, vals := range req.Header {
-		t.RequestInfo.Headers[k] = strings.Join(vals, ",")
-	}
-
-	// Add Authorization Header
-	authorization, err := w.HeaderAuthorization()
-	if err != nil {
-		return fmt.Errorf("cannot get Authorization header for webhook %s[%d %s]: %w", w.Type, w.ID, w.URL, err)
-	}
-	if authorization != "" {
-		req.Header.Set("Authorization", authorization)
-		t.RequestInfo.Headers["Authorization"] = "******"
+		return err
 	}
 
 	t.ResponseInfo = &webhook_model.HookResponse{
@@ -213,10 +257,13 @@ func Deliver(ctx context.Context, t *webhook_model.HookTask) error {
 	defer func() {
 		t.Delivered = timeutil.TimeStampNanoNow()
 		if t.IsSucceed {
+			t.Status = webhook_model.HookTaskStatusSucceed
 			log.Trace("Hook delivered: %s", t.UUID)
 		} else if !w.IsActive {
+			t.Status = webhook_model.HookTaskStatusFailed
 			log.Trace("Hook delivery skipped as webhook is inactive: %s", t.UUID)
 		} else {
+			t.Status = webhook_model.HookTaskStatusFailed
 			log.Trace("Hook delivery failed: %s", t.UUID)
 		}
 
@@ -245,27 +292,121 @@ func Deliver(ctx context.Context, t *webhook_model.HookTask) error {
 		return nil
 	}
 
-	resp, err := webhookHTTPClient.Do(req.WithContext(ctx))
-	if err != nil {
-		t.ResponseInfo.Body = fmt.Sprintf("Delivery: %v", err)
-		return fmt.Errorf("unable to deliver webhook task[%d] in %s due to error in http client: %w", t.ID, w.URL, err)
-	}
-	defer resp.Body.Close()
+	return sendHookRequest(ctx, w, t, req)
+}
 
-	// Status code is 20x can be seen as succeed.
-	t.IsSucceed = resp.StatusCode/100 == 2
-	t.ResponseInfo.Status = resp.StatusCode
-	for k, vals := range resp.Header {
-		t.ResponseInfo.Headers[k] = strings.Join(vals, ",")
+// deliverWithRetry delivers one attempt of a task in the retry state machine.
+// The attempt is claimed in the database first, so concurrent workers or several
+// instances can never send the same attempt twice.
+func deliverWithRetry(ctx context.Context, w *webhook_model.Webhook, t *webhook_model.HookTask) error {
+	now := timeutil.TimeStampNanoNow()
+	claimed, err := claimHookTask(ctx, t, now)
+	if err != nil {
+		log.Error("claimHookTask[%d]: %v", t.ID, err)
+		return fmt.Errorf("unable to claim hook task[%d] for delivery: %w", t.ID, err)
+	}
+	if !claimed {
+		log.Trace("Webhook Task[%d] is not due for delivery", t.ID)
+		return nil
+	}
+	t.IsDelivered = true
+	t.Status = webhook_model.HookTaskStatusSending
+
+	// attemptErr is nil only after a 2xx response. retryable decides between
+	// waiting/dead and the permanent failed state.
+	var attemptErr error
+	var retryable bool
+
+	defer func() {
+		t.Delivered = timeutil.TimeStampNanoNow()
+		if attemptErr == nil {
+			t.IsSucceed = true
+			t.Status = webhook_model.HookTaskStatusSucceed
+			t.NextRetryAt = 0
+			t.LastError = ""
+			log.Trace("Hook delivered: %s", t.UUID)
+		} else {
+			t.IsSucceed = false
+			t.LastError = attemptErr.Error()
+			if retryable && t.Retries < setting.Webhook.RetryMaxAttempts {
+				t.Retries++
+				t.Status = webhook_model.HookTaskStatusWaiting
+				t.NextRetryAt = t.Delivered + timeutil.TimeStampNano(nextRetryDelay(t.Retries))
+				log.Trace("Hook delivery failed, retry %d/%d scheduled for %s: %v", t.Retries, setting.Webhook.RetryMaxAttempts, t.UUID, attemptErr)
+			} else {
+				t.NextRetryAt = 0
+				if retryable {
+					t.Status = webhook_model.HookTaskStatusDead
+					log.Trace("Hook delivery dead after %d retries: %s", t.Retries, t.UUID)
+				} else {
+					t.Status = webhook_model.HookTaskStatusFailed
+					if !w.IsActive {
+						log.Trace("Hook delivery skipped as webhook is inactive: %s", t.UUID)
+					} else {
+						log.Trace("Hook delivery failed permanently: %s: %v", t.UUID, attemptErr)
+					}
+				}
+			}
+		}
+
+		if err := webhook_model.UpdateHookTask(ctx, t); err != nil {
+			log.Error("UpdateHookTask [%d]: %v", t.ID, err)
+		}
+
+		// Update webhook last delivery status.
+		if t.IsSucceed {
+			w.LastStatus = webhook_module.HookStatusSucceed
+		} else {
+			w.LastStatus = webhook_module.HookStatusFail
+		}
+		if err = webhook_model.UpdateWebhookLastStatus(ctx, w); err != nil {
+			log.Error("UpdateWebhookLastStatus: %v", err)
+			return
+		}
+	}()
+
+	req, err := prepareHookRequest(ctx, w, t)
+	if err != nil {
+		attemptErr = err // the request itself is invalid, never retry
+		return err
 	}
 
-	p, err := util.ReadWithLimit(resp.Body, 1024*1024)
-	if err != nil {
-		t.ResponseInfo.Body = fmt.Sprintf("read body: %s", err)
-		return fmt.Errorf("unable to deliver webhook task[%d] in %s as unable to read response body: %w", t.ID, w.URL, err)
+	t.ResponseInfo = &webhook_model.HookResponse{
+		Headers: map[string]string{},
 	}
-	t.ResponseInfo.Body = string(p)
+
+	if setting.DisableWebhooks {
+		attemptErr = fmt.Errorf("webhook task skipped (webhooks disabled): [%d]", t.ID)
+		return attemptErr
+	}
+
+	if !w.IsActive {
+		log.Trace("Webhook %s in Webhook Task[%d] is not active", w.URL, t.ID)
+		attemptErr = errors.New("webhook is inactive")
+		return nil
+	}
+
+	sendErr := sendHookRequest(ctx, w, t, req)
+	if sendErr != nil {
+		// Any transport-level failure (connection refused/reset, timeout, DNS,
+		// redirect errors, egress policy denial) is worth retrying.
+		attemptErr = sendErr
+		retryable = true
+		return sendErr
+	}
+	if !t.IsSucceed {
+		retryable, attemptErr = classifyHookTaskStatus(t.ResponseInfo.Status)
+	}
 	return nil
+}
+
+// classifyHookTaskStatus maps a receiver response status to the retry decision:
+// 408/429 and 5xx are temporary, every other non-2xx status is an explicit rejection.
+func classifyHookTaskStatus(status int) (retryable bool, err error) {
+	if status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 {
+		return true, fmt.Errorf("received non-successful HTTP status %d", status)
+	}
+	return false, fmt.Errorf("received non-retryable HTTP status %d", status)
 }
 
 var webhookHTTPClient *http.Client
@@ -286,18 +427,23 @@ func Init() error {
 
 	go graceful.GetManager().RunWithShutdownContext(populateWebhookSendingQueue)
 
+	if retryEnabled() {
+		go graceful.GetManager().RunWithShutdownContext(populateRetrySendingQueue)
+		go graceful.GetManager().RunWithShutdownContext(retryScheduleLoop)
+	}
+
 	return nil
 }
 
-func populateWebhookSendingQueue(ctx context.Context) {
-	ctx, _, finished := process.GetManager().AddContext(ctx, "Webhook: Populate sending queue")
+func enqueueHookTaskBatches(ctx context.Context, processName string, find func(lowerID int64) ([]int64, error)) {
+	ctx, _, finished := process.GetManager().AddContext(ctx, processName)
 	defer finished()
 
 	lowerID := int64(0)
 	for {
-		taskIDs, err := webhook_model.FindUndeliveredHookTaskIDs(ctx, lowerID)
+		taskIDs, err := find(lowerID)
 		if err != nil {
-			log.Error("Unable to populate webhook queue as FindUndeliveredHookTaskIDs failed: %v", err)
+			log.Error("Unable to populate webhook queue as %s failed: %v", processName, err)
 			return
 		}
 		if len(taskIDs) == 0 {
@@ -317,4 +463,10 @@ func populateWebhookSendingQueue(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func populateWebhookSendingQueue(ctx context.Context) {
+	enqueueHookTaskBatches(ctx, "Webhook: Populate sending queue", func(lowerID int64) ([]int64, error) {
+		return webhook_model.FindUndeliveredHookTaskIDs(ctx, lowerID)
+	})
 }

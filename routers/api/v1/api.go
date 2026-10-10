@@ -1909,6 +1909,8 @@ func Routes() *web.Router {
 				m.Combo("/{id}").Get(admin.GetHook).
 					Patch(bind(api.EditHookOption{}), admin.EditHook).
 					Delete(admin.DeleteHook)
+				m.Get("/{id}/tasks", admin.ListHookTasks)
+				m.Post("/{id}/tasks/redeliver", bind(api.RedeliverHookTasksOption{}), admin.RedeliverHookTasks)
 			})
 			m.Group("/actions", func() {
 				m.Group("/runners", func() {
